@@ -21,8 +21,8 @@ test/app_fullstack
 test/app_fullstack_asan
 examples/fullstack_todo/app
 examples/fullstack_todo/app_asan
-examples/fullstack_todo/dist/
 todos.db*
+.honk-dev-*
 bench/c_control/server_c
 src/spike/verify_rref
 src/spike/spike_d1

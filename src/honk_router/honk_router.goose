@@ -60,7 +60,7 @@ inline fn known_path(path: const u8[:]) -> bool {
 // --- middleware (inline; zero-alloc; fully inlined into dispatch) ---
 
 // D-007 hot-path exemption: / and /plaintext stage NO extra headers so they
-// stay byte-identical to Phase 1 / the bare-C control. The middleware still
+// stay byte-identical to the transport baseline / the bare-C control. The middleware still
 // RUNS (two slice compares) so measured overhead is honest.
 inline fn hot_exempt(path: const u8[:]) -> bool {
     return path == "/" || path == "/plaintext";
