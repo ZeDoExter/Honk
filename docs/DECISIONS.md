@@ -1,7 +1,7 @@
 # Architectural & Engineering Decisions (`docs/DECISIONS.md`)
 
 ## D-001: Primary Target Environment — WSL2 Linux (Ubuntu 24.04, GCC 13.3.0)
-- **Context**: The host machine runs Windows 10/11 with WSL2 (Ubuntu 24.04.4 LTS, Linux kernel `6.6.87.2-microsoft-standard-WSL2`, Intel Core i5-10300H 4 physical cores / 8 threads). Phases 1–3 require Linux `epoll`, `SO_REUSEPORT` kernel load-balancing across `thread_fn` workers, `taskset` CPU pinning, and `wrk`.
+- **Context**: The host machine runs Windows 10/11 with WSL2 (Ubuntu 24.04.4 LTS, Linux kernel `6.6.87.2-microsoft-standard-WSL2`, Intel Core i5-10300H 4 physical cores / 8 threads). The server, test suites, and benchmarks require Linux `epoll`, `SO_REUSEPORT` kernel load-balancing across `thread_fn` workers, `taskset` CPU pinning, and `wrk`.
 - **Decision**: Build and run the Honk server, C epoll shim, test suite, and benchmarks natively inside WSL2 Linux using the Linux Goose compiler (`goose_repo/build-linux/goose` + GCC 13.3.0).
 - **Physical Core Mapping (`lscpu -e`)**:
   - Physical Core 0: Logical CPUs `0, 1`
@@ -52,30 +52,30 @@
   - Max header size: `HONK_MAX_HEADER_SIZE = 8192` bytes (exceeding returns `431 Request Header Fields Too Large` and closes the connection).
   - Max body size: `HONK_MAX_BODY_SIZE = 1048576` bytes (1 MiB; `Content-Length > 1048576` returns `413 Payload Too Large` and closes the connection).
   - Max pending tx buffer: `HONK_MAX_PENDING_TX = 1048576` bytes (1 MiB; if a peer never reads responses and queued `pending_tx` would exceed 1 MiB, the connection is closed cleanly).
-  - Chunked transfer encoding: `Transfer-Encoding: chunked` returns `501 Not Implemented` and closes the connection in Phase 1.
+  - Chunked transfer encoding: `Transfer-Encoding: chunked` returns `501 Not Implemented` and closes the connection (transport layer).
   - Idle connection & slowloris timeout: Connections tracking `last_active_ms` (and `rx_start_ms` when holding an incomplete header) are swept and closed cleanly if idle longer than `tls_idle_timeout_ms`.
 
-## D-006: Phase 2 Framework Architecture (Stage + Central Emit, Dispatch-as-Code)
-- **Context**: Phase 2 adds `Context`/`Request`/`Response`, routing, middleware, and JSON on the locked Phase 1 transport (`honk_conn_read`/`honk_parse_req`/`honk_send`/`honk_conn_finish`). No shim or buffer-design change was needed.
+## D-006: Framework Architecture (Stage + Central Emit, Dispatch-as-Code)
+- **Context**: The framework adds `Context`/`Request`/`Response`, routing, middleware, and JSON on the locked transport (`honk_conn_read`/`honk_parse_req`/`honk_send`/`honk_conn_finish`). No shim or buffer-design change was needed.
 - **Decision**:
-  1. **Stage + central emit** (`src/honk_ctx/honk_ctx.goose`): handlers stage `(status, content-type, body-slice, extra-headers)` into `Ctx`; a single `emit()` produces all HTTP framing. `Content-Length` is therefore correct by construction; `HEAD` (headers, no body) and `204` (zero length) fall out of one code path. Direct-slice replies (`text`/`bytes` of an existing view) copy zero bytes; constructed bodies (JSON, greetings) serialize once into a per-request `body_buf` and are appended once.
+  1. **Stage + central emit** (`src/honk_ctx/honk_ctx.goose`): handlers stage `(status, content-type, body-slice, extra-headers)` into `Ctx`; a single `emit()` produces all HTTP framing. `Content-Length` is therefore correct by construction; `HEAD` (headers, no body) and `204` (zero length) fall out of one code path. Direct-slice replies (`text`/`bytes` of an existing view) copy zero bytes; constructed bodies (JSON, greetings) serialize once into the per-request `c.res` builder and are appended once.
   2. **Dispatch-as-code** (`src/honk_router/honk_router.goose`): an inline `if/else` graph over `(method, path)` with zero-alloc matchers (`match_1param`, `match_org_repo`) instead of a table of function pointers, so every handler/middleware inlines into the worker loop (verified: no `_g` definitions for `dispatch`, handlers, or middleware in generated C; `header`/`query` stay real calls on cold routes only). `known_path()` (all route shapes, any method) drives `404` vs `405`.
   3. **Middleware as inline fns**: before-chain (`mw_first`, `mw_second`, `mw_auth` guard returning `false` to short-circuit) + after-hook (`mw_after`, runs post-handler, pre-emit). Zero allocations, fully inlined; execution order is observable in `X-MW-1`/`X-MW-2` header order.
   4. **Pure-Goose header/query parsing**: `req.header()` (case-insensitive scan of the raw header block) and `req.query()` (raw `k=v&` scan, no percent-decoding) slice `rx_buf` in place. No `RawReq`/shim extension was required.
   5. **Caller-owned `json::Reader`** (`src/honk_json/honk_json.goose`): `parse_typed_fields(r: Reader&, scratch, t)` takes a caller-owned reader and out-struct because `read_string` views root at `r.text` (borrow §9.2) and cannot cross a function boundary from a callee-owned reader. Unescaped strings stay zero-copy views into `rx_buf`; only escaped strings decode into per-request `scratch`. Struct fields (not `var` re-binding) hold mixed-root slices.
-  6. **Explicit per-request scope per pipelined request**: `body_buf`/`scratch`/`doc`/`decoded` are declared in an inner block inside the `while cursor < rx_buf.len` loop; generated C resets `+3/+4/+5` tops on every loop-back edge and holds the `+2` (body) top in a register with writeback-before-call. Worker uses 11 data stacks (`--stacks`).
+  6. **Explicit per-request scope per pipelined request**: `res`/`tmp`/`dom`/`dstr` builders are declared in an inner block inside the `while cursor < rx_buf.len` loop; generated C resets their tops on every loop-back edge and holds the body top in a register with writeback-before-call. Worker uses 11 data stacks (`--stacks`).
 
 ## D-007: Hot-Path Exemption for `/` and `/plaintext` (Byte-Compatibility)
-- **Context**: The Phase 2 vs bare-C interleave requires `curl -i` byte-identical 115-byte `GET /plaintext` responses, but global middleware stages extra headers (`X-MW-1/2`, `X-Worker`).
-- **Decision**: Middleware still RUNS on `/` and `/plaintext` (two slice compares + auth path check) but stages no headers there, keeping responses byte-identical to Phase 1 / the C control while the measured `User CPU/req` honestly includes middleware execution. All other routes carry the injected headers.
+- **Context**: The framework-vs-bare-C interleave requires `curl -i` byte-identical 115-byte `GET /plaintext` responses, but global middleware stages extra headers (`X-MW-1/2`, `X-Worker`).
+- **Decision**: Middleware still RUNS on `/` and `/plaintext` (two slice compares + auth path check) but stages no headers there, keeping responses byte-identical to the transport baseline / the C control while the measured `User CPU/req` honestly includes middleware execution. All other routes carry the injected headers.
 
-## D-008: Phase 3 Bench Mode (`HONK_BENCH_MODE`, Worker-TLS Flag)
-- **Context**: Cross-framework workloads need exact bodies on standard paths (`/json` -> exactly `{"message":"Hello, World!"}`, `/users/:id` -> `{"id","role"}` + only `X-Frame-Bench`, `POST /users` -> validate -> `201`/`400`), while Phase 2 routes on the same paths return different shapes.
-- **Decision**: A worker-TLS global set from `argv[5]` selects bench behavior inside the existing dispatch (one predictable branch per affected route). Default mode (`0`) is behavior-identical to Phase 2 — all Phase 1/2 tests run unmodified with the flag off. Bench mode replaces the decoration middleware chain with the single `mw_bench` W3 hook only.
+## D-008: Cross-Framework Bench Mode (`HONK_BENCH_MODE`, Worker-TLS Flag)
+- **Context**: Cross-framework workloads need exact bodies on standard paths (`/json` -> exactly `{"message":"Hello, World!"}`, `/users/:id` -> `{"id","role"}` + only `X-Frame-Bench`, `POST /users` -> validate -> `201`/`400`), while demo routes on the same paths return different shapes.
+- **Decision**: A worker-TLS global set from `argv[5]` selects bench behavior inside the existing dispatch (one predictable branch per affected route). Default mode (`0`) is behavior-identical to the demo app — all transport/framework tests run unmodified with the flag off. Bench mode replaces the decoration middleware chain with the single `mw_bench` W3 hook only.
 
 ## D-009: `src/` Package Layout (One Directory Per Framework Module)
 - **Context**: Goose packages need a directory of their own: a root file cannot import several modules from one directory (`import honk_net from "../../src"` + `import honk_ctx from "../../src"` is rejected), and there is no re-export, so external apps (and `examples/quickstart/`) could not use a flat `src/*.goose` framework.
-- **Decision**: `src/honk_net/`, `src/honk_ctx/`, `src/honk_json/`, `src/honk_router/` — each a Goose package. Roots declare packages (`import honk_net from "./honk_net";`); framework files reference each other bare (`import honk_net;`, resolved from root declarations). Shim C stays in root `.build` files. Verified by full regression (900k turns, Phase 1 9/9, Phase 2 10/10 Release + ASan).
+- **Decision**: `src/honk_net/`, `src/honk_ctx/`, `src/honk_json/`, `src/honk_router/` — each a Goose package. Roots declare packages (`import honk_net from "./honk_net";`); framework files reference each other bare (`import honk_net;`, resolved from root declarations). Shim C stays in root `.build` files. Verified by full regression (900k turns, transport 9/9, framework 10/10 Release + ASan).
 
 ## D-010: Static Files via Kernel `sendfile` (Per-Request Sends)
 - **Context**: Pipelined static responses need headers + file bytes in request order, but `tx_buf` batching cannot interleave file bytes between later responses' headers, and builders cannot truncate mid-turn.

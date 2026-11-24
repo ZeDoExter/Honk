@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Requirement G: Fixed Measurement Protocol for Step 1b.
+Requirement G: Fixed Measurement Protocol (interleaved C vs Honk runs).
   - Interleaved 7 rounds (C, Goose, C, Goose, ...), discard Round 1, report median and min/max across Rounds 2..7.
   - Record server CPU% and wrk CPU% during each run via `pidstat -u -p <pid> 1`.
   - Mark any run where server core is not near 100% busy (< 85% CPU) as SATURATED-BY-CLIENT.

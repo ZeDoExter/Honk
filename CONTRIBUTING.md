@@ -92,5 +92,5 @@ stderr. Never commit `/tmp` artifacts; `build/` is gitignored scratch.
 ## Reports & decisions (history, keep navigable)
 
 `docs/DECISIONS.md` (D-001…), `docs/goose-issues.md`,
-`docs/{phase0-report,step1a-spike-report,step1b-report,phase2-report,phase3-report}.md`.
+`docs/history/{phase0-report,step1a-spike-report,step1b-report,phase2-report,phase3-report,phase5-report}.md`.
 When renaming files, sweep every reference (docs + code + `.build` + CI).

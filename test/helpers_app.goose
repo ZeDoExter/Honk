@@ -1,4 +1,4 @@
-// test/helpers_app.goose -- exercises every Phase 4 web helper for test_web.py.
+// test/helpers_app.goose -- exercises every web helper for test_web.py.
 // Served via the public honk::serve API (also dogfoods it under ASan).
 // NOTE: blocks are inlined: never `return`/`break` inside them; use if/else.
 

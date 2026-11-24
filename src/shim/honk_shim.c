@@ -1,4 +1,4 @@
-/* honk_shim.c -- Phase 1 Step 1b C epoll + picohttpparser shim for Honk.
+/* honk_shim.c -- C epoll + picohttpparser shim for Honk.
  *
  * Enforces:
  *  - Amendment A / D-003: Design (iii) direct-to-Goose-data-stack recv() fast
@@ -84,7 +84,7 @@ typedef struct {
     size_t pending_tx_cap;
     int64_t last_active_ms;
     int64_t rx_start_ms;
-    /* Phase 5 zero-copy static files: at most one active sendfile per conn.
+    /* Static files (sendfile): at most one active sendfile per conn.
      * file_remain > 0 means file_fd is open and owned by this slot. */
     int sendfile_fd;
     int _file_pad;
@@ -732,7 +732,7 @@ int32_t honk_send(int32_t fd, sl_u8_shim data) {
     return (int32_t)data.len;
 }
 
-/* Phase 5 static files: secure open + size + zero-copy send.
+/* Static files: secure open + size + zero-copy send.
  *
  * honk_file_open(root, rel): opens root/rel read-only. rel must already be
  * validated by the caller (relative, decoded, no NUL/backslash/.. segments).

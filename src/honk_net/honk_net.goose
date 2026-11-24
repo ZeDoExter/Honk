@@ -1,4 +1,4 @@
-// honk_net.goose -- Phase 1 HTTP/1.1 network layer in Goose over src/shim/honk_shim.c.
+// honk_net.goose -- Honk HTTP/1.1 network layer in Goose over src/shim/honk_shim.c.
 
 import std;
 import os;
@@ -73,7 +73,7 @@ inline fn write_error_response(out: u8[>..]&, err_code: i32, date_hdr: const u8[
     }
 }
 
-inline fn handle_phase1_request(fd: i32, method: const u8[:], path: const u8[:], body: const u8[:],
+inline fn handle_minimal_request(fd: i32, method: const u8[:], path: const u8[:], body: const u8[:],
                                 date_hdr: const u8[:], keep_alive: bool,
                                 tx_buf: u8[>..]&) {
     if method == "GET" && (path == "/" || path == "/plaintext") {
@@ -143,7 +143,7 @@ inline fn process_ready_fd(fd: i32, date_hdr: const u8[:]) -> i64 {
         let path = rem_slice[req.path_off .. req.path_end];
         let body = rem_slice[req.body_off .. req.body_end];
         let ka = req.keep_alive != 0;
-        handle_phase1_request(fd, method, path, body, date_hdr, ka, tx_buf);
+        handle_minimal_request(fd, method, path, body, date_hdr, ka, tx_buf);
         cursor += req.consumed;
         if !ka {
             close_conn = true;

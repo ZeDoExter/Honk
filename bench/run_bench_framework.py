@@ -95,11 +95,11 @@ def check_curl_equivalence(port_c, port_p2):
             if b_c == b_g:
                 break
             time.sleep(1.1 - time.time() % 1 + 0.05)
-        with open("bench/curl_c_control_p2.txt", "wb") as f:
+        with open("bench/curl_c_control_framework.txt", "wb") as f:
             f.write(b_c)
-        with open("bench/curl_phase2.txt", "wb") as f:
+        with open("bench/curl_honk_framework.txt", "wb") as f:
             f.write(b_g)
-        print(f"  C control bytes: {len(b_c)}, Phase2 bytes: {len(b_g)}")
+        print(f"  C control bytes: {len(b_c)}, Honk bytes: {len(b_g)}")
         assert len(b_c) == 115 and len(b_g) == 115, (len(b_c), len(b_g))
         assert b_c == b_g, f"byte mismatch:\n{b_c!r}\n{b_g!r}"
         print("  [PASS] curl -i 115-byte equivalence")
@@ -173,7 +173,7 @@ def main():
     port_p2 = 18391
     port_j = 18392
 
-    print("=== A. curl -i byte-equivalence (C control vs Phase 2) ===")
+    print("\n=== A. curl -i byte-equivalence (C control vs Honk) ===")
     check_curl_equivalence(port_c, port_p2)
 
     print("\n=== B. 7-round interleaved GET /plaintext (Round 1 = warmup) ===")

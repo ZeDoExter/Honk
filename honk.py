@@ -431,12 +431,12 @@ def cmd_test(_args):
         if r.returncode != 0:
             raise subprocess.CalledProcessError(r.returncode, cmd)
 
-    gate("build: servers + stack + helpers + phase5 + quickstart + fullstack", lambda: [
+    gate("build: servers + stack + helpers + fullstack-test + quickstart + fullstack", lambda: [
         build("src/server_minimal.goose", "src/server_minimal"),
         build("src/server.goose", "src/server"),
         build("test/test_stack_discipline.goose", "test/test_stack_discipline"),
         build("test/helpers_app.goose", "test/helpers_app"),
-        build("test/phase5_app.goose", "test/phase5_app"),
+        build("test/app_fullstack.goose", "test/app_fullstack"),
         build("examples/quickstart/app.goose", "examples/quickstart/app"),
         build("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app"),
     ])
@@ -448,20 +448,20 @@ def cmd_test(_args):
          lambda: suite(["python3", "test/test_framework.py", "./src/server", "18210", "Release"]))
     gate("web-helper suite (Release)",
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app", "18420", "Release"]))
-    gate("build: ASan server + helpers + phase5 + fullstack", lambda: [
+    gate("build: ASan server + helpers + fullstack-test + fullstack", lambda: [
         build_asan("src/server.goose", "src/server_asan"),
         build_asan("test/helpers_app.goose", "test/helpers_app_asan"),
-        build_asan("test/phase5_app.goose", "test/phase5_app_asan"),
+        build_asan("test/app_fullstack.goose", "test/app_fullstack_asan"),
         build_asan("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app_asan"),
     ])
     gate("framework suite (ASan+UBSan+LSan)",
          lambda: suite(["python3", "test/test_framework.py", "./src/server_asan", "18310", "ASan"]))
     gate("web-helper suite (ASan+UBSan+LSan)",
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app_asan", "18421", "ASan"]))
-    gate("phase5 fullstack suite (Release)",
-         lambda: suite(["python3", "test/test_phase5_fullstack.py", "./test/phase5_app", "18440", "Release"]))
-    gate("phase5 fullstack suite (ASan+UBSan+LSan)",
-         lambda: suite(["python3", "test/test_phase5_fullstack.py", "./test/phase5_app_asan", "18450", "ASan"]))
+    gate("fullstack suite (Release)",
+         lambda: suite(["python3", "test/test_fullstack.py", "./test/app_fullstack", "18440", "Release"]))
+    gate("fullstack suite (ASan+UBSan+LSan)",
+         lambda: suite(["python3", "test/test_fullstack.py", "./test/app_fullstack_asan", "18450", "ASan"]))
 
     print(f"\n{'ALL GREEN' if not fails else 'FAILURES: ' + ', '.join(fails)}")
     return 0 if not fails else 1

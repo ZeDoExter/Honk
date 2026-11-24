@@ -1,4 +1,4 @@
--- bench/post_typed.lua -- wrk POST workload for Honk Phase 2 POST /api/typed.
+-- bench/post_typed.lua -- wrk POST workload for Honk POST /api/typed.
 -- Exercises typed json::Reader binding: nested object, array, numbers,
 -- unknown-key skip. Same body every request (static benchmark payload).
 wrk.method = "POST"

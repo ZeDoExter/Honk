@@ -42,7 +42,7 @@ Hono or Flask.
 ### Benchmarks, examples & docs
 - 10-framework shootout (`bench/run_bench_compete.py`): Honk wins every
   dynamic workload at 2.1–3.4× the nearest rival (single-core, WSL2
-  indicative) — see `docs/phase3-report.md`.
+  indicative) — see `docs/history/phase3-report.md`.
 - `examples/quickstart/` and `examples/fullstack_todo/` (single-binary Todo
   app: sendfile frontend + SQLite API); `Dockerfile`, GitHub Actions CI,
   `MIT` license; `QUICKSTART`/`GUIDE`/`API` docs + `CONTRIBUTING` invariants.

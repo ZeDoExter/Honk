@@ -4,7 +4,7 @@ Zero-regression sanity: Honk (serve API, bench mode) vs Bare-C on W1+W2.
 
 5 interleaved rounds after a 3s warm-up each (same pinning/protocol as the
 compete harness), plus an RSS flatness check. Fails loudly on >15% median
-req/s drop vs the recorded Phase 3 baselines or any RSS growth.
+req/s drop vs the recorded baselines or any RSS growth.
 """
 
 import json
@@ -19,7 +19,7 @@ from run_bench_transport import summarize_runs  # noqa: E402
 import run_bench_compete as C  # noqa: E402
 
 BASELINES = {
-    # Phase 3 medians (same box, WSL2 indicative): rps + user us/req.
+    # Recorded medians (same box, WSL2 indicative): rps + user us/req.
     "W1": {"rps": 83512.72, "usr": 0.863},
     "W2": {"rps": 73476.54, "usr": 1.208},
 }

@@ -13,7 +13,7 @@ struct WorkerCfg {
     cpu_id: i32,
 }
 
-thread_fn worker_phase1(cfg: WorkerCfg) {
+thread_fn worker_minimal(cfg: WorkerCfg) {
     honk_pin_thread_cpu(cfg.worker_id, cfg.cpu_id);
     honk_set_timeouts(cfg.idle_timeout_ms, cfg.header_timeout_ms);
     guard honk_worker_init(cfg.port) == 0 else { abort("honk_worker_init failed"); }
@@ -80,7 +80,7 @@ fn main() {
             worker_id: w,
             cpu_id: cpu_id,
         };
-        tids.push(thread_spawn(worker_phase1, cfg));
+        tids.push(thread_spawn(worker_minimal, cfg));
     }
 
     for tid in tids {

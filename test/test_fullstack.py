@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Phase 5 fullstack suite: sendfile static + SQLite (Release + ASan+UBSan+LSan).
+Fullstack suite: sendfile static + SQLite (Release + ASan+UBSan+LSan).
 
-Drives test/phase5_app (static matrix, EAGAIN resume, traversal/security,
+Drives test/app_fullstack (static matrix, EAGAIN resume, traversal/security,
 CRUD, UTF-8/injection, malformed-JSON discipline, 2-worker WAL, FD-leak)
 plus an examples/fullstack_todo end-to-end smoke. Asserts clean exit 0,
 zero sanitizer findings, and zero leaked file descriptors.
@@ -52,7 +52,7 @@ def req(port, payload, timeout=10.0):
 def setup_fixtures(tag):
     # Native temp dir (mkdtemp): the repo may sit on a 9P/Windows mount that
     # lacks FIFOs/symlinks/SQLite locking. One process: create, use, delete.
-    root = tempfile.mkdtemp(prefix=f"p5root_{tag}_")
+    root = tempfile.mkdtemp(prefix=f"fsroot_{tag}_")
     for name in os.listdir(os.path.join(ROOT, "test", "static_fixtures")):
         src = os.path.join(ROOT, "test", "static_fixtures", name)
         dst = os.path.join(root, name)
@@ -275,7 +275,7 @@ def test_db_strings(port):
 
 
 def test_db_2workers(server_bin, port, label):
-    err_path = f"/tmp/honkp5_{label}_w2_stderr.txt"
+    err_path = f"/tmp/honkfs_{label}_w2_stderr.txt"
     root, dbpath, _ = setup_fixtures(label + "w2")
     with open(err_path, "wb") as err_fh:
         proc = subprocess.Popen([server_bin, str(port), root, "2", dbpath],
@@ -388,7 +388,7 @@ def test_fullstack_e2e(label):
             pass
     port = 18449 if label == "Release" else 18459
     app_bin = os.path.join(app_dir, "app_asan" if label != "Release" else "app")
-    err_path = f"/tmp/honkp5_{label}_fs_stderr.txt"
+    err_path = f"/tmp/honkfs_{label}_fs_stderr.txt"
     with open(err_path, "wb") as err_fh:
         proc = subprocess.Popen([app_bin, str(port)],
                                 stdout=subprocess.PIPE, stderr=err_fh, cwd=app_dir)
@@ -453,9 +453,9 @@ def wait_for_port(port, timeout=5.0):
 
 
 def run_suite(server_bin, port, label):
-    print(f"=== Running Phase 5 Suite [{label}] ({server_bin}) ===")
+    print(f"=== Running Fullstack Suite [{label}] ({server_bin}) ===")
     root, dbpath, big_sha = setup_fixtures(label)
-    err_path = f"/tmp/honkp5_{label}_stderr.txt"
+    err_path = f"/tmp/honkfs_{label}_stderr.txt"
     with open(err_path, "wb") as err_fh:
         proc = subprocess.Popen([server_bin, str(port), root, "1", dbpath],
                                 stdout=subprocess.PIPE, stderr=err_fh, cwd=ROOT)
@@ -486,11 +486,11 @@ def run_suite(server_bin, port, label):
         assert m not in err, f"[{label}] sanitizer hit: {err[-1500:]!r}"
     test_db_2workers(server_bin, port + 50, label)
     test_fullstack_e2e(label)
-    print(f"=== ALL 10 PHASE 5 TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 10 FULLSTACK TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "./test/phase5_app"
+    binary = sys.argv[1] if len(sys.argv) > 1 else "./test/app_fullstack"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 18440
     label = sys.argv[3] if len(sys.argv) > 3 else "Release"
     run_suite(binary, port, label)

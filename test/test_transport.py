@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 1 Step 1b Correctness Test Suite for Honk (Amendment C + Requirements E & F).
+Transport Correctness Test Suite for Honk (timeouts, caps, soak, edge cases).
 Can run against either the release `goose build` binary or an ASan+UBSan instrumented binary.
 """
 

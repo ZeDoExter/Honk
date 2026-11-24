@@ -64,8 +64,7 @@ How it gets there:
 | [`examples/quickstart/`](examples/quickstart/) | Full commented example app |
 | [`examples/fullstack_todo/`](examples/fullstack_todo/) | Single-binary Todo app (sendfile UI + SQLite API) |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architecture decision record (D-001…) |
-| [`docs/phase3-report.md`](docs/phase3-report.md) | 10-framework benchmark report + method |
-| [`docs/phase5-report.md`](docs/phase5-report.md) | Toolchain setup, sendfile, SQLite, full-stack + perf |
+| [`docs/history/`](docs/history/) | Development log: transport → framework → shootout → DX → v0.1.0 |
 
 ## Build, test, deploy
 
@@ -109,7 +108,7 @@ Caddy); Honk speaks plain HTTP/1.1 with keep-alive + pipelining.
 `wrk -t2 -c64 -d5s` on sibling cores, 5 interleaved rounds, medians.
 **WSL2 indicative** — ratios are the robust readout; re-run on bare metal with
 `python3 bench/run_bench_compete.py`. Full methodology + versions + round data:
-[`docs/phase3-report.md`](docs/phase3-report.md).
+[`docs/history/phase3-report.md`](docs/history/phase3-report.md).
 
 **Throughput, `req/s` (median of 5)**
 
@@ -162,5 +161,4 @@ idle + slowloris timeouts, `SO_REUSEPORT` multi-worker with CPU pinning, Linux
 
 **Not yet**: TLS (terminate at a reverse proxy), HTTP/2+, chunked request bodies
 (`501`), WebSockets. See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the
-architecture record and [`docs/phase3-report.md`](docs/phase3-report.md) for
-benchmark details.
+architecture record and [`docs/history/`](docs/history/) for the development log.

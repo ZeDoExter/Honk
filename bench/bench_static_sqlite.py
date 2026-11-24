@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 5 perf baseline (Release, single-core pinned, WSL2 indicative).
+Static + SQLite perf baseline (Release, single-core pinned, WSL2 indicative).
 
 - W1 non-regression: Bare-C vs Honk bench mode, GET /plaintext, 5 rounds.
 - Static: Honk sendfile GET /asset256k.bin (256 KiB), 5 rounds.
@@ -77,11 +77,11 @@ def main():
              "30000", "10000", "1", "1"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
         procs["static"] = subprocess.Popen(
-            ["taskset", "-c", "0", "./test/phase5_app", "18633", work, "1",
+            ["taskset", "-c", "0", "./test/app_fullstack", "18633", work, "1",
              os.path.join(work, "static.db")],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
         procs["db"] = subprocess.Popen(
-            ["taskset", "-c", "0", "./test/phase5_app", "18634", work, "1", dbpath],
+            ["taskset", "-c", "0", "./test/app_fullstack", "18634", work, "1", dbpath],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
         for p in (18631, 18632, 18633, 18634):
             wait_ready(p)
@@ -149,7 +149,7 @@ def main():
         print(f"  {key}: {kb:.1f} KiB, libsqlite3 linked: {has_sqlite}")
     out["sizes"] = sizes
 
-    with open("bench/bench_phase5_perf.json", "w") as f:
+    with open("bench/bench_static_sqlite.json", "w") as f:
         json.dump(out, f, indent=2)
     print("\n=== Medians ===")
     for k in ("w1_c", "w1_honk", "static", "sqlite"):

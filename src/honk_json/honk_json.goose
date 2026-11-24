@@ -1,4 +1,4 @@
-// honk_json.goose -- Phase 2 JSON framework helpers over stdlib/json.goose.
+// honk_json.goose -- JSON framework helpers over stdlib/json.goose.
 //
 // - Typed zero-DOM binding (json::Reader) for POST /api/typed: required
 //   fields (name: string, age: int), optional score (number), tags (array of
@@ -165,7 +165,7 @@ fn emit_hello_json(out: u8[>..]&) {
     out.append("]}}");
 }
 
-// --- Phase 3 cross-framework workloads (TechEmpower-shaped, exact bodies) ---
+// --- Cross-framework benchmark workloads (TechEmpower-shaped, exact bodies) ---
 
 // W2: serialize {"message":"Hello, World!"} dynamically per request.
 fn emit_bench_msg(out: u8[>..]&) {

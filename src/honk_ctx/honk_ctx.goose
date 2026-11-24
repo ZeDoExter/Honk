@@ -481,7 +481,7 @@ fn status_text(code: i64) -> const u8[:] {
 }
 
 // Central response emit: the ONLY place HTTP framing is produced.
-// Field order matches Phase 1 (Content-Type, Date, [extras...],
+// Field order matches the transport baseline (Content-Type, Date, [extras...],
 // [Connection: close], Content-Length) so /plaintext stays byte-identical
 // to the bare-C control when no extras are staged.
 fn emit(c: Ctx&, out: u8[>..]&, date: const u8[:]) {

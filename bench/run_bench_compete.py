@@ -352,7 +352,7 @@ def main():
                "ports": ports, "cold_start_s": {}, "runs": {}, "summaries": {},
                "rss": {}, "footprint": {}}
 
-    print("=== Phase 0: preflight parity (200 + 400 on every contender) ===")
+    print("=== Preflight parity (200 + 400 on every contender) ===")
     for c in CONTENDERS:
         cold, _ = preflight_contender(c, ports[c["key"]])
         results["cold_start_s"][c["key"]] = round(cold, 3)

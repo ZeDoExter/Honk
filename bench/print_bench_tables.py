@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print compact Phase 3 round tables for the report (repo root cwd)."""
+"""Print compact cross-framework round tables for the report (repo root cwd)."""
 import json
 import statistics
 
