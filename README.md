@@ -1,9 +1,46 @@
 # Honk — a zero-copy HTTP framework in Goose
 
 Honk is an HTTP/1.1 backend framework written in [Goose](https://github.com/aardappel/goose)
-(ahead-of-time compiled to C) for Linux `epoll` servers that do more work per core with
-less memory: **~2 MB RSS**, a **0.17 MiB zero-dependency binary**, and zero per-request
-heap allocations.
+(ahead-of-time compiled to C) for Linux `epoll` servers: a 15-line Hello World,
+**~2 MB flat RSS**, a **~150 KiB zero-dependency binary**, and zero per-request
+heap allocations — at `89%` of hand-written C speed.
+
+```sh
+git clone https://github.com/ZeDoExter/Honk.git && cd Honk
+./honk doctor               # checks gcc + pinned Goose + wrk
+./honk new my-api && ./honk dev my-api     # scaffold + auto-reload dev server
+curl http://127.0.0.1:18080/               # Hello from my-api!
+```
+
+A complete Hello World + JSON app is ~15 lines of Goose:
+
+```goose
+import honk_serve from "/path/to/Honk/src/honk_serve";  // (+ honk_net, honk_ctx)
+
+thread_fn worker(port: i32) {
+    honk::listen_or_abort(port);
+    honk::serve() { fd, date =>
+        honk::request(fd, date) { ctx =>
+            if ctx.method == "GET" && ctx.path == "/" {
+                ctx.text(200, "Hello, World!");
+            } else if ctx.method == "GET" && ctx.path == "/json" {
+                ctx.res.append("{\"message\":\"Hello, World!\"}");
+                ctx.json_raw(200, ctx.res[..]);
+            }   // anything else answers 404 automatically
+        };
+    };
+}
+
+fn main() {
+    let tid = thread_spawn(worker, 18080);
+    thread_wait(tid);
+}
+```
+
+New to Goose? [`docs/QUICKSTART.md`](docs/QUICKSTART.md) gets you productive in
+5 minutes with a JS/Go/Python cheat sheet. Never heard of `epoll`? Good — you
+will never touch it: routing, JSON, middleware, and buffers are
+zero-copy machinery under a boring, obvious API.
 
 How it gets there:
 
@@ -12,45 +49,37 @@ How it gets there:
   allocated C side buffers (`partial_rx` / `pending_tx`, freed on drain/close).
 - **Zero-copy views**: method, path, query, headers, params, and body are slices into
   the request buffer — parsed in place with `picohttpparser`, never copied.
-- **Scoped builders**: per-request `body`/`scratch`/JSON buffers live in an explicit
-  inner scope and reset to base on every pipelined request (verified in generated C).
-- **Dispatch-as-code**: routes and middleware are inline functions that fold directly
-  into the worker loop — no function-pointer tables, no per-request closures.
+- **Scoped builders**: per-request builders live in an explicit inner scope and reset
+  on every pipelined request (verified in generated C).
+- **Dispatch-as-code**: routes and middleware monomorphize straight into the worker
+  loop — no function-pointer tables, no per-request closures.
 
-## Quickstart
+## Documentation index
 
-```sh
-git clone https://github.com/ZeDoExter/Honk.git && cd Honk
-# Goose ships pinned in ./goose_repo (v2026.4-78-g2239b92e); build it once:
-#   (see goose_repo README — needs gcc/clang + cmake)
-./goose_repo/build-linux/goose build examples/quickstart/app.goose -o /tmp/honk-qs
-/tmp/honk-qs 18080
-```
-
-```sh
-curl "http://127.0.0.1:18080/hello/ada?title=Dr"     # Hello, Dr ada!
-curl -X POST http://127.0.0.1:18080/signup \
-  -H "Content-Type: application/json" \
-  -d '{"username":"ada","email":"ada@honk.dev"}'     # {"created":true,...}
-```
-
-Full walkthrough (routes, params, query, middleware, guards, typed JSON POST,
-sanitizer build): [`examples/quickstart/`](examples/quickstart/).
-
-A 40-line taste (`app.goose` dispatch + handler):
-
-```goose
-inline fn h_hello(c: Ctx&, body_buf: u8[>..]&) {
-    let title, ok = c.query("title");          // zero-copy view into rx_buf
-    body_buf.append("Hello, ");
-    if ok { body_buf.append(title); body_buf.push(' '); }
-    body_buf.append(c.param(0));               // :name, zero-copy
-    body_buf.push('!');
-    c.text(200, body_buf);                     // staged; emit() frames once
-}
-```
+| Doc | For |
+|---|---|
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 5-minute tutorial + Goose cheat sheet |
+| [`docs/GUIDE.md`](docs/GUIDE.md) | Recipes: routing, JSON, auth, CORS, cookies, deploy |
+| [`docs/API.md`](docs/API.md) | Every public function, one table per module |
+| [`examples/quickstart/`](examples/quickstart/) | Full commented example app |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Framework internals + PR checklist |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architecture decision record (D-001…) |
+| [`docs/phase3-report.md`](docs/phase3-report.md) | 10-framework benchmark report + method |
 
 ## Build, test, deploy
+
+```sh
+./honk test                        # everything: 900k turns + suites + ASan
+./honk build my-api --release      # -> my-api/dist/main, zero dependencies
+./my-api/dist/main 8080
+```
+
+```sh
+# Docker, no local toolchain (kiri or docker, same syntax):
+kiri build -t honk:quickstart . && kiri run --rm -p 18080:18080 honk:quickstart
+```
+
+### Manual commands (what `./honk` wraps)
 
 ```sh
 # Framework demo server (all routes + cross-framework bench mode via argv[5]=1):

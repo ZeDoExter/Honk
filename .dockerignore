@@ -1,0 +1,15 @@
+.git/
+goose_repo/
+build/
+**/node_modules/
+**/__pycache__/
+bench/competitors/
+bench/*.json
+test/test_stack_discipline*
+src/server*
+src/server_minimal*
+examples/quickstart/app
+examples/quickstart/app_asan
+*.o
+*.obj
+*.exe

@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+      - name: Build Goose (pinned)
+        run: |
+          git clone https://github.com/aardappel/goose.git goose_repo
+          cd goose_repo
+          git checkout 2239b92eb2ae0e8f390f98640b09ff57a17698fc
+          cmake -B build-linux -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux --config Release -j"$(nproc)"
+
+      - name: Doctor
+        run: ./honk doctor
+
+      - name: Full test suite (Release + ASan/UBSan/LSan)
+        run: ./honk test

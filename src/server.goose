@@ -1,16 +1,18 @@
-// server.goose -- Honk framework server (+ cross-framework bench mode).
+// server.goose -- Honk framework demo server (+ cross-framework bench mode).
 // Usage: ./server [port] [idle_timeout_ms] [header_timeout_ms] [num_workers] [bench_mode]
-// Same transport/worker model as Phase 1; requests dispatch through the
-// honk_router framework (Ctx + middleware + routes + JSON).
+// bench_mode=1 enables HONK_BENCH_MODE: workload-exact routes on standard
+// paths with decoration middleware off. All transport mechanics live in
+// honk_serve; this file only declares the worker, spawns it, and routes.
 
 import std;
 import os;
 import honk_net from "./honk_net";
-import honk_router from "./honk_router";
 import honk_ctx from "./honk_ctx";
 import honk_json from "./honk_json";
+import honk_router from "./honk_router";
+import honk_serve from "./honk_serve";
 
-struct WorkerCfg2 {
+struct WorkerCfg {
     port: i32,
     idle_timeout_ms: i32,
     header_timeout_ms: i32,
@@ -19,29 +21,21 @@ struct WorkerCfg2 {
     bench: i32,
 }
 
-thread_fn worker_phase2(cfg: WorkerCfg2) {
+thread_fn worker(cfg: WorkerCfg) {
     HONK_BENCH_MODE = cfg.bench != 0;
-    honk_pin_thread_cpu(cfg.worker_id, cfg.cpu_id);
-    honk_set_timeouts(cfg.idle_timeout_ms, cfg.header_timeout_ms);
-    guard honk_worker_init(cfg.port) == 0 else { abort("honk_worker_init failed"); }
-
-    var ready_fds: i32[256] = [0; 256];
-    var date_hdr: u8[29] = [0; 29];
-
-    loop {
-        let nfds = honk_wait(ready_fds, date_hdr, 100);
-        if nfds <= 0 { continue; }
-        assert(nfds <= 256);
-
-        for i in nfds {
-            let fd = ready_fds[i];
-            process_ready_fd2(fd, date_hdr);
-        }
-        if honk_should_stop() != 0 {
-            honk_worker_shutdown();
-            break;
-        }
-    }
+    var scfg = honk::Config {
+        port: cfg.port,
+        idle_ms: cfg.idle_timeout_ms,
+        header_ms: cfg.header_timeout_ms,
+        worker_id: cfg.worker_id,
+        cpu_id: cfg.cpu_id,
+    };
+    honk::listen_cfg_or_abort(scfg);
+    honk::serve() { fd, date =>
+        honk::request(fd, date) { ctx =>
+            dispatch(ctx);
+        };
+    };
 }
 
 fn main() {
@@ -80,12 +74,13 @@ fn main() {
           ", header_timeout_ms=", header_timeout_ms,
           ", bench=", bench, ")");
     flush_stdout();
+
     var tids: i64[..4] = [];
     for w in num_workers {
         // Physical core mapping on 4C/8T WSL2 (lscpu -e):
         // Core 0 -> CPU 0, Core 1 -> CPU 2, Core 2 -> CPU 4, Core 3 -> CPU 6
         let cpu_id: i32 = w * 2;
-        let cfg = WorkerCfg2 {
+        let cfg = WorkerCfg {
             port: port,
             idle_timeout_ms: idle_timeout_ms,
             header_timeout_ms: header_timeout_ms,
@@ -93,7 +88,7 @@ fn main() {
             cpu_id: cpu_id,
             bench: bench,
         };
-        tids.push(thread_spawn(worker_phase2, cfg));
+        tids.push(thread_spawn(worker, cfg));
     }
 
     for tid in tids {

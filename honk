@@ -1,0 +1,8 @@
+#!/bin/sh
+# ./honk -- thin wrapper: runs honk.py from this directory.
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$ROOT/honk.py" "$@"
+else
+  exec python "$ROOT/honk.py" "$@"
+fi
