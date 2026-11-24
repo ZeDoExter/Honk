@@ -10,6 +10,8 @@ build/
 *.dylib
 src/server_phase1
 src/server_phase1_asan
+src/server_phase2
+src/server_phase2_asan
 test/test_stack_discipline
 test/test_stack_discipline_asan
 bench/c_control/server_c
