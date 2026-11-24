@@ -1,5 +1,6 @@
 goose_repo/
 build/
+__pycache__/
 *.exe
 *.obj
 *.o
