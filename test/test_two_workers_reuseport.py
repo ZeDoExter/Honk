@@ -56,7 +56,7 @@ def get_worker_cpu_affinities(pid: int) -> list:
 
 
 def main():
-    server_bin = sys.argv[1] if len(sys.argv) > 1 else "./src/server_phase1"
+    server_bin = sys.argv[1] if len(sys.argv) > 1 else "./src/server_minimal"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 18170
     total_conns = 200
 

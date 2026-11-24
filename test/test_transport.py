@@ -387,7 +387,7 @@ def wait_for_port(port: int, timeout: float = 5.0):
 
 
 def run_suite(server_bin: str, base_port: int, label: str):
-    print(f"=== Running Phase 1 Correctness Suite [{label}] ({server_bin}) ===")
+    print(f"=== Running Transport Correctness Suite [{label}] ({server_bin}) ===")
     # 1. Normal-timeout server instance (idle_timeout_ms=30000, header_timeout_ms=10000) for tests 1..6 and 9
     port_norm = base_port
     proc_norm = subprocess.Popen(
@@ -453,7 +453,7 @@ def run_suite(server_bin: str, base_port: int, label: str):
 
 
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "./src/server_phase1"
+    binary = sys.argv[1] if len(sys.argv) > 1 else "./src/server_minimal"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 18100
     label = sys.argv[3] if len(sys.argv) > 3 else "Release"
     run_suite(binary, port, label)

@@ -41,7 +41,7 @@ def wait_for_port(port: int, timeout: float = 5.0):
 
 
 def main():
-    server_bin = sys.argv[1] if len(sys.argv) > 1 else "./src/server_phase1"
+    server_bin = sys.argv[1] if len(sys.argv) > 1 else "./src/server_minimal"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 18195
     duration_sec = int(sys.argv[3]) if len(sys.argv) > 3 else 600
     sample_interval = 30

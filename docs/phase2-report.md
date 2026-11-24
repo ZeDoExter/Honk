@@ -8,8 +8,8 @@
 
 ## 1. Executive Summary
 
-- **Goal**: Build the Honk HTTP framework layer (`src/honk_ctx.goose`, `src/honk_json.goose`,
-  `src/honk_router.goose`, `src/server_phase2.goose`) on the locked Phase 1 transport.
+- **Goal**: Build the Honk HTTP framework layer (`src/honk_ctx/honk_ctx.goose`, `src/honk_json/honk_json.goose`,
+  `src/honk_router/honk_router.goose`, `src/server.goose`) on the locked Phase 1 transport.
 - **Shim / buffer-design changes required**: **None**. Zero-copy `Context`, dispatch-as-code
   routing, middleware, header/query parsing, and JSON all compose on unmodified
   `honk_conn_read` / `honk_parse_req` / `honk_send` / `honk_conn_finish` + Candidate (iii)
@@ -35,12 +35,12 @@
 
 | File | Contents |
 |---|---|
-| `src/honk_ctx.goose` | `Ctx` (zero-copy views + staged response), `make_ctx`, `header` (case-insensitive), `query`, `param`, `set_header`, `text`/`bytes`/`json_body`, `status_text`, central `emit` |
-| `src/honk_json.goose` | `parse_typed_fields` (caller-owned `json::Reader`), `emit_typed_post`, `dom_summary` (`json::parse`), `emit_dom_res`, `emit_hello_json` |
-| `src/honk_router.goose` | `match_1param`/`match_org_repo`/`known_path`, middleware (`mw_first`, `mw_second`, `mw_auth`, `mw_after`), 13 handlers, `dispatch`/`dispatch_get`, `process_ready_fd2` (per-request scopes) |
-| `src/server_phase2.goose` | Multi-worker runner: `[port] [idle_timeout_ms] [header_timeout_ms] [num_workers]`, `thread_fn` + `SO_REUSEPORT` + `honk_pin_thread_cpu`, clean `honk_worker_shutdown` exit |
+| `src/honk_ctx/honk_ctx.goose` | `Ctx` (zero-copy views + staged response), `make_ctx`, `header` (case-insensitive), `query`, `param`, `set_header`, `text`/`bytes`/`json_body`, `status_text`, central `emit` |
+| `src/honk_json/honk_json.goose` | `parse_typed_fields` (caller-owned `json::Reader`), `emit_typed_post`, `dom_summary` (`json::parse`), `emit_dom_res`, `emit_hello_json` |
+| `src/honk_router/honk_router.goose` | `match_1param`/`match_org_repo`/`known_path`, middleware (`mw_first`, `mw_second`, `mw_auth`, `mw_after`), 13 handlers, `dispatch`/`dispatch_get`, `process_ready_fd2` (per-request scopes) |
+| `src/server.goose` | Multi-worker runner: `[port] [idle_timeout_ms] [header_timeout_ms] [num_workers]`, `thread_fn` + `SO_REUSEPORT` + `honk_pin_thread_cpu`, clean `honk_worker_shutdown` exit |
 
-### 2.2 Route Table (`server_phase2.goose` demo app)
+### 2.2 Route Table (`server.goose` demo app)
 
 | Method | Path | Handler | Response |
 |---|---|---|---|
@@ -77,7 +77,7 @@
 - **Per-request scope** per pipelined request: `body_buf`/`scratch`/`doc`/`decoded`
   reset every loop iteration (verified in generated C).
 
-### 2.4 Example (`server_phase2.goose` worker)
+### 2.4 Example (`server.goose` worker)
 
 ```goose
 thread_fn worker_phase2(cfg: WorkerCfg2) {
@@ -106,18 +106,18 @@ thread_fn worker_phase2(cfg: WorkerCfg2) {
 
 - `./test/test_stack_discipline`: **all 9 paths × 100,000 (`900,000` turns) PASS**,
   `stk->top == baseline` every turn.
-- `python3 test/test_phase1_correctness.py ./src/server_phase1`: **9/9 PASS**.
+- `python3 test/test_transport.py ./src/server_minimal`: **9/9 PASS**.
 
-### 3.2 Phase 2 Suite (`test/test_phase2_framework.py`, 10 tests)
+### 3.2 Phase 2 Suite (`test/test_framework.py`, 10 tests)
 
-Release build: `goose build src/server_phase2.goose -o src/server_phase2`.
+Release build: `goose build src/server.goose -o src/server`.
 ASan build:
 ```sh
-./goose_repo/build-linux/goose -o /tmp/server_phase2_standalone.c --standalone src/server_phase2.goose
+./goose_repo/build-linux/goose -o /tmp/server_standalone.c --standalone src/server.goose
 gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
-  -Isrc/shim -Igoose_repo/src/runtime /tmp/server_phase2_standalone.c \
+  -Isrc/shim -Igoose_repo/src/runtime /tmp/server_standalone.c \
   src/shim/honk_shim.c src/shim/picohttpparser.c \
-  -o src/server_phase2_asan -lm -pthread -ldl
+  -o src/server_asan -lm -pthread -ldl
 ```
 
 | Test | Verified | Release | ASan+UBSan+LSan |
@@ -141,7 +141,7 @@ gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
 
 ## 4. `--bce-lines` & Generated C Audit
 
-### 4.1 BCE (`goose check src/server_phase2.goose --bce-lines`)
+### 4.1 BCE (`goose check src/server.goose --bce-lines`)
 
 - **Elided**: `ready_fds[i]` (hot loop), `c.params[0..1]` literal indices,
   `c.extras[i]` in `emit` after hoisting `n_extra` to a local (2 elided, 0 kept),
@@ -158,7 +158,7 @@ gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
 - **Hot path (`/plaintext`)**: zero kept checks beyond the 3 inherited Phase 1 span
   checks; dispatch is compare + call only.
 
-### 4.2 Generated C (`server_phase2.c`, 13,126 lines)
+### 4.2 Generated C (`server.c`, 13,126 lines)
 
 - **Inlining**: `dispatch`, `dispatch_get`, `process_ready_fd2`, `make_ctx`, all 13
   handlers, all 4 middleware fns, `known_path`, `text`/`bytes`/`json_body`,
@@ -250,9 +250,9 @@ Median: **`148,263.67 req/s`**, Total `6.865 µs` (User `0.781`, Sys `6.083`).
 
 Median: **`98,874.32 req/s`**, Total `10.439 µs` (User `1.784`, Sys `8.756`).
 
-### 5.4 Memory (`bench/step2_bench_results.json` → `rss`)
+### 5.4 Memory (`bench/bench_framework_results.json` → `rss`)
 
-| `server_phase2` state | `VmRSS` / `VmHWM` |
+| `server` state | `VmRSS` / `VmHWM` |
 |---|---:|
 | Idle (0 conns) | `1,920 kB` / `1,920 kB` |
 | 64 active conns | `1,920 kB` / `1,920 kB` |
@@ -271,6 +271,6 @@ property holds.
   diagnostics were legitimate and fixed in our code).
 - No percent-decoding in `query()` and no wildcard/catch-all route (multi-`:param` +
   static + 404/405 cover the spec; both are easy follow-ups if Phase 3 wants them).
-- Raw artifacts: `bench/step2_bench_results.json`, `bench/curl_c_control_p2.txt`,
-  `bench/curl_phase2.txt`, `bench/post_typed.lua`, `bench/run_step2_bench.py`.
+- Raw artifacts: `bench/bench_framework_results.json`, `bench/curl_c_control_p2.txt`,
+  `bench/curl_phase2.txt`, `bench/post_typed.lua`, `bench/run_bench_framework.py`.
 - Phase 3 can proceed: framework API stable, transport untouched, overhead quantified.

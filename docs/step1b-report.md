@@ -1,7 +1,7 @@
 # Phase 1, Step 1b Report — Full HTTP/1.1 Network Layer, Stack Discipline, Limits & Fixed Measurement Protocol
 
 ## 1. Executive Summary
-- **Goal**: Complete the Phase 1 HTTP/1.1 network layer ([src/shim/honk_shim.c](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/shim/honk_shim.c), [src/shim/honk_rref.h](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/shim/honk_rref.h), [src/honk_net.goose](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/honk_net.goose), [src/server_phase1.goose](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/server_phase1.goose)) implementing Amendment C and Requirements E, F, G, and H.
+- **Goal**: Complete the Phase 1 HTTP/1.1 network layer ([src/shim/honk_shim.c](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/shim/honk_shim.c), [src/shim/honk_rref.h](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/shim/honk_rref.h), [src/honk_net/honk_net.goose](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/honk_net/honk_net.goose), [src/server_minimal.goose](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/server_minimal.goose)) implementing Amendment C and Requirements E, F, G, and H.
 - **Buffer Design Changes Required**: **None**. Design (iii) (direct-to-Goose-data-stack `recv()` on the fast path + lazily allocated C thread-local `partial_rx` and `pending_tx` buffers across `epoll` events) handled every requirement cleanly without changing the buffer architecture.
 - **Anything That Could Not Be Done**: **None** — every item in Amendment C and Requirements E, F, G, and H was implemented, compiled, and verified.
 
@@ -32,10 +32,10 @@
 | 9 | `timeout` (partial header read into `rx_buf`, stashed in `partial_rx`, swept by timeout) | `100,000` | `123352573280256` | `123352573280256` | **PASS** |
 
 ### E.3. AddressSanitizer + UndefinedBehaviorSanitizer (`-fsanitize=address,undefined -fno-sanitize-recover=all`)
-- Built both `test_stack_discipline_asan` and `server_phase1_asan` by emitting standalone C (`goose -o ... --standalone`) and compiling the Goose program, Goose runtime, `honk_shim.c`, and `picohttpparser.c` together with `gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all`.
+- Built both `test_stack_discipline_asan` and `server_minimal_asan` by emitting standalone C (`goose -o ... --standalone`) and compiling the Goose program, Goose runtime, `honk_shim.c`, and `picohttpparser.c` together with `gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all`.
 - The server supports clean worker shutdown (`honk_worker_shutdown()`) so `main()` exits with status `0` and **LeakSanitizer (LSan)** runs full end-of-process heap leak verification.
 - **Findings**:
-  - **0 ASan/UBSan/LSan errors** across all 900,000 iterations of `test_stack_discipline_asan` and across all 9 test suites in `test/test_phase1_correctness.py`.
+  - **0 ASan/UBSan/LSan errors** across all 900,000 iterations of `test_stack_discipline_asan` and across all 9 test suites in `test/test_transport.py`.
   - During development of Path 8 (`400 Bad Request`), we uncovered a subtle `picohttpparser` edge case: when a malformed request line has `< 9` bytes remaining after the path (e.g., `"BAD REQUEST LINE\r\n\r\n"` where `"LINE\r\n\r\n"` is 8 bytes), `picohttpparser`'s `parse_http_version` checks `if (buf_end - buf < 9) return -2;` (incomplete) before checking if `\r\n\r\n` has already ended the header block. We fixed this in [src/shim/honk_shim.c](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/shim/honk_shim.c#L524-L526) (and identically in [bench/c_control/server_c.c](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/bench/c_control/server_c.c#L479-L483)) by checking `if (pret == -2 && scan_len >= 4 && memmem(buf.data, scan_len, "\r\n\r\n", 4) != NULL) return -400;`.
 
 ---
@@ -51,8 +51,8 @@
   - `HONK_MAX_PENDING_TX = 1048576` bytes (1 MiB; if an unread client causes `pending_tx` to exceed 1 MiB -> close connection and free `pending_tx`).
   - `Transfer-Encoding: chunked` -> `501 Not Implemented`, close (documented in [docs/DECISIONS.md](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/docs/DECISIONS.md#L69)).
 
-### 3.2. Full Correctness Test Suite ([test/test_phase1_correctness.py](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/test/test_phase1_correctness.py))
-All 9 tests passed on both **Release (`./src/server_phase1`)** and **ASan+UBSan (`./src/server_phase1_asan`)**:
+### 3.2. Full Correctness Test Suite ([test/test_transport.py](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/test/test_transport.py))
+All 9 tests passed on both **Release (`./src/server_minimal`)** and **ASan+UBSan (`./src/server_minimal_asan`)**:
 
 | Test | Requirement Verified | Release | ASan+UBSan |
 |---|---|---|---|
@@ -67,7 +67,7 @@ All 9 tests passed on both **Release (`./src/server_phase1`)** and **ASan+UBSan 
 | `test_09_5000_plus_connections_cap` | Opens `5,100` concurrent connections: `active` capped at `4096`, `1,004` excess cleanly rejected, active connections continue serving `200 OK`, clean recovery to `active=1` | **PASS** | **PASS** |
 
 ### 3.3. 10-Minute RSS Soak Test ([test/test_10min_soak.py](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/test/test_10min_soak.py), [bench/soak_10min_rss.json](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/bench/soak_10min_rss.json))
-- Ran a continuous `connect -> request -> close` loop for **600 seconds (10 minutes)** against `./src/server_phase1`, completing **138,681 connections** (`~231 conns/sec`).
+- Ran a continuous `connect -> request -> close` loop for **600 seconds (10 minutes)** against `./src/server_minimal`, completing **138,681 connections** (`~231 conns/sec`).
 - Every 4th connection (`34,670` connections) sent a split-`recv()` 2,048-byte `POST /echo` across two separate `send()` calls with `TCP_NODELAY` and a 1 ms gap, continuously exercising lazy `c->partial_rx` `realloc()` and `free()` on drain/close.
 - Sampled `VmRSS` and `VmHWM` from `/proc/<pid>/status` every 30 seconds:
 
@@ -110,9 +110,9 @@ Replacing Step 1a's pre-faulted inline 16 KB buffer array with lazy per-connecti
 | Server | Idle (0 conns) `VmRSS` / `VmHWM` | 64 Active Conns `VmRSS` / `VmHWM` | 1024 Active Conns `VmRSS` / `VmHWM` |
 |---|---:|---:|---:|
 | **Bare-C Control** (`bench/c_control/server_c`) | `1,408 kB` / `1,408 kB` | `1,536 kB` / `1,536 kB` | `1,536 kB` / `1,536 kB` |
-| **Goose Honk (Phase 1)** (`src/server_phase1`) | `1,408 kB` / `1,408 kB` | `1,408 kB` / `1,408 kB` | `1,408 kB` / `1,408 kB` |
+| **Goose Honk (Phase 1)** (`src/server_minimal`) | `1,408 kB` / `1,408 kB` | `1,408 kB` / `1,408 kB` | `1,408 kB` / `1,408 kB` |
 
-### G.3. 7-Round Interleaved Benchmark (`C, Goose, C, Goose, ...`) with `pidstat` and CPU Time per Request ([bench/step1b_interleaved_results.json](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/bench/step1b_interleaved_results.json))
+### G.3. 7-Round Interleaved Benchmark (`C, Goose, C, Goose, ...`) with `pidstat` and CPU Time per Request ([bench/bench_transport_results.json](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/bench/bench_transport_results.json))
 - **Setup**: Single worker pinned to CPU `0` (Physical Core 0); `wrk -t2 -c64 -d10s --latency` pinned to CPUs `4,6` (Physical Cores 2 & 3). All numbers are **indicative only (WSL2)**.
 - **Round-by-Round Data (Round 1 discarded as warmup)**:
 
@@ -158,7 +158,7 @@ Replacing Step 1a's pre-faulted inline 16 KB buffer array with lazy per-connecti
 ## 5. Requirement H: Two-Worker `SO_REUSEPORT` Smoke Test on Separate Physical Cores
 
 - Test script: [test/test_two_workers_reuseport.py](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/test/test_two_workers_reuseport.py).
-- Spawned 2 Goose `thread_fn` workers in [src/server_phase1.goose](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/server_phase1.goose), each calling `honk_pin_thread_cpu` and `honk_worker_init` (`SO_REUSEPORT`):
+- Spawned 2 Goose `thread_fn` workers in [src/server_minimal.goose](file:///c:/Users/navap/Desktop/Nav/Personal/Honk/src/server_minimal.goose), each calling `honk_pin_thread_cpu` and `honk_worker_init` (`SO_REUSEPORT`):
   - **Worker 0**: Pinned to Logical CPU `0` (**Physical Core 0**), verified via `/proc/<pid>/task/<tid>/status` (`Cpus_allowed_list: 0`).
   - **Worker 1**: Pinned to Logical CPU `2` (**Physical Core 1**), verified via `/proc/<pid>/task/<tid>/status` (`Cpus_allowed_list: 2`).
 - Sent `200` connections to the shared port on both Release and ASan+UBSan builds:

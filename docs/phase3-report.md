@@ -4,7 +4,7 @@
 > collected on WSL2 (Ubuntu 24.04.4 LTS, kernel `6.6.87.2-microsoft-standard-WSL2`,
 > Intel Core i5-10300H @ 2.50 GHz, 4C/8T). Servers pinned to CPU `0` (1 worker);
 > `wrk -t2 -c64 -d5s --latency` pinned to CPUs `4,6`. Final claims require bare metal.
-> Re-run anywhere with one command: `python3 bench/run_phase3.py` (repo root).
+> Re-run anywhere with one command: `python3 bench/run_bench_compete.py` (repo root).
 
 ## 1. Executive Summary
 
@@ -36,7 +36,7 @@
 | # | Contender | Runtime / compiler | Framework / notes |
 |---|---|---|---|
 | 1 | Bare-C Control (W1 only) | `gcc 13.3.0` (Ubuntu 24.04) | `epoll` + `picohttpparser`, existing `bench/c_control/server_c` |
-| 2 | Honk (Goose) | `goose v2026.4-78-g2239b92e` + `gcc 13.3.0` | `src/server_phase2` bench mode (`... 1 1`) |
+| 2 | Honk (Goose) | `goose v2026.4-78-g2239b92e` + `gcc 13.3.0` | `src/server` bench mode (`... 1 1`) |
 | 3 | Rust Axum | `rustc/cargo 1.100.0` | `axum 0.8.9`, `tokio 1.54.1` (`current_thread`), `serde_json 1.0.154`, `--release` |
 | 4 | Go `net/http` | `go 1.22.2` | stdlib only, `GOMAXPROCS=1`, `ServeMux` `GET /users/{id}` |
 | 5 | `Bun.serve` | `bun 1.4.5` | raw, manual routing, zero deps |
@@ -89,9 +89,9 @@ Load generator: `wrk` (`-t2 -c64 -d5s --latency`) + `wrk -s bench/post_users.lua
   `pidstat -u` server/`wrk` CPU% with `<85%` server-CPU client-bottleneck flag.
 - **Resources**: `VmRSS`/`VmHWM` at idle / 64 / 512 conns after a 3 s load burst;
   cold-start ms (spawn → first `200`); artifact bytes (`du -sb`).
-- Harness: `bench/run_phase3.py` (imports shared helpers from
-  `bench/run_step1b_interleaved.py`). Total run: **19.8 min**. Raw data:
-  `bench/phase3_results.json`.
+- Harness: `bench/run_bench_compete.py` (imports shared helpers from
+  `bench/run_bench_transport.py`). Total run: **19.8 min**. Raw data:
+  `bench/bench_compete_results.json`.
 
 ## 5. Results — Throughput & CPU (Medians of 5 Rounds)
 
@@ -184,7 +184,7 @@ Elysia `11485 11095 8652 8267 10721`; Hono `13235 16664 14901 15612 14751`;
 Fastify `7199 7478 6345 7495 7113`; Express `2054 1585 1814 1887 1667`;
 FastAPI `2520 2580 2752 2588 2539`.
 
-Full per-round CPU/latency rows: `bench/phase3_results.json`.
+Full per-round CPU/latency rows: `bench/bench_compete_results.json`.
 
 ## 6. Resources, Startup & Footprint
 
@@ -244,9 +244,9 @@ unaffected. Disclosed, not normalized.
 | Gate | Result |
 |---|---|
 | `test_stack_discipline` (`900k` turns) | **PASS** |
-| `test_phase1_correctness.py` (9 tests, Release) | **PASS** |
-| `test_phase2_framework.py` (10 tests, Release) | **PASS** |
-| `test_phase2_framework.py` (10 tests, ASan+UBSan+LSan, rebuilt) | **PASS**, exit `0`, **0 findings** |
+| `test_transport.py` (9 tests, Release) | **PASS** |
+| `test_framework.py` (10 tests, Release) | **PASS** |
+| `test_framework.py` (10 tests, ASan+UBSan+LSan, rebuilt) | **PASS**, exit `0`, **0 findings** |
 | `examples/quickstart` (Release + ASan, curl-verified) | **PASS**, exit `0`, **0 findings** |
 
 ## 9. Disclosures & Limitations

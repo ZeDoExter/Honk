@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Phase 2 performance + memory baseline (Release builds ONLY, indicative WSL2).
+Framework performance + memory baseline (Release builds ONLY, indicative WSL2).
 
-A. curl -i 115-byte equivalence: bare-C control vs server_phase2 /plaintext.
-B. 7-round interleaved GET /plaintext (C, Phase2, ...) with pidstat + CPU/req.
+A. curl -i 115-byte equivalence: bare-C control vs Honk server /plaintext.
+B. 7-round interleaved GET /plaintext (C, Honk, ...) with pidstat + CPU/req.
 C. JSON baselines: GET /json (4 rounds) + POST /api/typed via wrk Lua (4 rounds).
 D. RSS check: idle / 64 / 1024 conns + after sustained JSON traffic.
 """
@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_step1b_interleaved import (  # noqa: E402
+from run_bench_transport import (  # noqa: E402
     BUN_BIN, CLK_TCK, PIDSTAT_BIN, WRK_BIN, parse_pidstat_averages,
     parse_wrk_output, read_proc_cpu_ticks, summarize_runs, wait_for_port,
 )
@@ -83,7 +83,7 @@ def curl_bytes(port, target="/plaintext"):
 def check_curl_equivalence(port_c, port_p2):
     proc_c = subprocess.Popen(["taskset", "-c", "0", "./bench/c_control/server_c", str(port_c)],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    proc_g = subprocess.Popen(["taskset", "-c", "0", "./src/server_phase2", str(port_p2),
+    proc_g = subprocess.Popen(["taskset", "-c", "0", "./src/server", str(port_p2),
                                "30000", "10000", "1"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -122,7 +122,7 @@ def read_proc_mem(pid):
 
 
 def measure_rss(port):
-    proc = subprocess.Popen(["./src/server_phase2", str(port), "30000", "10000", "1"],
+    proc = subprocess.Popen(["./src/server", str(port), "30000", "10000", "1"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         proc.stdout.readline()
@@ -179,7 +179,7 @@ def main():
     print("\n=== B. 7-round interleaved GET /plaintext (Round 1 = warmup) ===")
     proc_c = subprocess.Popen(["taskset", "-c", "0", "./bench/c_control/server_c", str(port_c)],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    proc_g = subprocess.Popen(["taskset", "-c", "0", "./src/server_phase2", str(port_p2),
+    proc_g = subprocess.Popen(["taskset", "-c", "0", "./src/server", str(port_p2),
                                "30000", "10000", "1"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     c_runs, g_runs = [], []
@@ -191,7 +191,7 @@ def main():
                                       r, "Bare-C Control"))
             time.sleep(0.5)
             g_runs.append(run_one_url(proc_g.pid, f"http://127.0.0.1:{port_p2}/plaintext",
-                                      r, "Honk Phase 2"))
+                                      r, "Honk Framework"))
             time.sleep(0.5)
     finally:
         proc_c.terminate()
@@ -200,7 +200,7 @@ def main():
         proc_g.wait()
 
     print("\n=== C1. GET /json baseline (Round 1 = warmup) ===")
-    proc_j = subprocess.Popen(["taskset", "-c", "0", "./src/server_phase2", str(port_j),
+    proc_j = subprocess.Popen(["taskset", "-c", "0", "./src/server", str(port_j),
                                "30000", "10000", "1"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     json_runs, post_runs = [], []
@@ -208,12 +208,12 @@ def main():
         wait_for_port(port_j)
         for r in range(1, 5):
             json_runs.append(run_one_url(proc_j.pid, f"http://127.0.0.1:{port_j}/json",
-                                         r, "Phase2 GET /json"))
+                                         r, "Honk GET /json"))
             time.sleep(0.5)
         print("\n=== C2. POST /api/typed baseline via wrk Lua (Round 1 = warmup) ===")
         for r in range(1, 5):
             post_runs.append(run_one_url(proc_j.pid, f"http://127.0.0.1:{port_j}/api/typed",
-                                         r, "Phase2 POST typed",
+                                         r, "Honk POST typed",
                                          script="bench/post_typed.lua"))
             time.sleep(0.5)
     finally:
@@ -228,16 +228,16 @@ def main():
     g_sum = summarize_runs(g_runs[1:])
     j_sum = summarize_runs(json_runs[1:])
     p_sum = summarize_runs(post_runs[1:])
-    with open("bench/step2_bench_results.json", "w") as f:
-        json.dump({"c_runs_all": c_runs, "phase2_runs_all": g_runs,
+    with open("bench/bench_framework_results.json", "w") as f:
+        json.dump({"c_runs_all": c_runs, "honk_runs_all": g_runs,
                    "json_get_runs_all": json_runs, "json_post_runs_all": post_runs,
-                   "c_summary_r2_r7": c_sum, "phase2_summary_r2_r7": g_sum,
+                   "c_summary_r2_r7": c_sum, "honk_summary_r2_r7": g_sum,
                    "json_get_summary_r2_r4": j_sum, "json_post_summary_r2_r4": p_sum,
                    "rss": rss}, f, indent=2)
 
     print("\n=== Summary (indicative WSL2) ===")
-    for name, s in (("Bare-C", c_sum), ("Phase2 /plaintext", g_sum),
-                    ("Phase2 GET /json", j_sum), ("Phase2 POST typed", p_sum)):
+    for name, s in (("Bare-C", c_sum), ("Honk /plaintext", g_sum),
+                    ("Honk GET /json", j_sum), ("Honk POST typed", p_sum)):
         print(f"{name:18s}: median {s['rps_median']:.2f} req/s "
               f"(min {s['rps_min']:.2f}, max {s['rps_max']:.2f}) | "
               f"CPU/req {s['cpu_us_per_req_median']:.3f} us "

@@ -1,5 +1,5 @@
-// server_phase2.goose -- Phase 2 Honk framework server (+ Phase 3 bench mode).
-// Usage: ./server_phase2 [port] [idle_timeout_ms] [header_timeout_ms] [num_workers] [bench_mode]
+// server.goose -- Honk framework server (+ cross-framework bench mode).
+// Usage: ./server [port] [idle_timeout_ms] [header_timeout_ms] [num_workers] [bench_mode]
 // Same transport/worker model as Phase 1; requests dispatch through the
 // honk_router framework (Ctx + middleware + routes + JSON).
 
@@ -74,7 +74,7 @@ fn main() {
     }
     assert(num_workers >= 1 && num_workers <= 4);
 
-    print("Honk Phase 2 server listening on port ", port,
+    print("Honk server listening on port ", port,
           " (workers=", num_workers,
           ", idle_timeout_ms=", idle_timeout_ms,
           ", header_timeout_ms=", header_timeout_ms,

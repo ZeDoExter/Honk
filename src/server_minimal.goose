@@ -1,5 +1,5 @@
-// server_phase1.goose -- Phase 1 Step 1b HTTP/1.1 Server in Goose.
-// Usage: ./server_phase1 [port] [idle_timeout_ms] [header_timeout_ms] [num_workers]
+// server_minimal.goose -- Minimal Honk transport demo (raw epoll + handlers, no framework).
+// Usage: ./server_minimal [port] [idle_timeout_ms] [header_timeout_ms] [num_workers]
 
 import std;
 import os;
@@ -62,7 +62,7 @@ fn main() {
     }
     assert(num_workers >= 1 && num_workers <= 4);
 
-    print("Honk Phase 1 server listening on port ", port,
+    print("Honk minimal server listening on port ", port,
           " (workers=", num_workers,
           ", idle_timeout_ms=", idle_timeout_ms,
           ", header_timeout_ms=", header_timeout_ms, ")");

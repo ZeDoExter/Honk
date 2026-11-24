@@ -45,7 +45,7 @@ def check_curl_equivalence():
     port_c = 18181
     port_g = 18182
     proc_c = subprocess.Popen(["./bench/c_control/server_c", str(port_c)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    proc_g = subprocess.Popen(["./src/server_phase1", str(port_g)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc_g = subprocess.Popen(["./src/server_minimal", str(port_g)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         wait_for_port(port_c)
         wait_for_port(port_g)
@@ -128,7 +128,7 @@ def measure_server_rss(cmd: list, port: int, label: str) -> dict:
 def main():
     check_curl_equivalence()
     c_rss = measure_server_rss(["./bench/c_control/server_c", "18183"], 18183, "Bare-C Control")
-    g_rss = measure_server_rss(["./src/server_phase1", "18184"], 18184, "Goose Honk (Phase 1)")
+    g_rss = measure_server_rss(["./src/server_minimal", "18184"], 18184, "Honk minimal")
     with open("bench/rss_measurements.json", "w") as f:
         json.dump({"c_control": c_rss, "goose_honk": g_rss}, f, indent=2)
 

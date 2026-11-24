@@ -199,7 +199,7 @@ def main():
         stderr=subprocess.PIPE,
     )
     proc_g = subprocess.Popen(
-        ["taskset", "-c", "0", "./src/server_phase1", str(port_g), "30000", "10000", "1"],
+        ["taskset", "-c", "0", "./src/server_minimal", str(port_g), "30000", "10000", "1"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -258,7 +258,7 @@ def main():
         "goose_summary_r2_r7": g_sum,
         "bun_sanity_summary_r2_r4": b_sum,
     }
-    with open("bench/step1b_interleaved_results.json", "w") as f:
+    with open("bench/bench_transport_results.json", "w") as f:
         json.dump(out_data, f, indent=2)
 
     print("\n=== Summary (Rounds 2..7, Round 1 discarded; Indicative WSL2 Numbers) ===")

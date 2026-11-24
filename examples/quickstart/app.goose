@@ -167,7 +167,7 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
     return !c.keep_alive;
 }
 
-// --- turn loop: same transport pattern as src/honk_router.goose ---
+// --- turn loop: same transport pattern as src/honk_router/honk_router.goose ---
 
 inline fn process_fd(fd: i32, date_hdr: const u8[:]) {
     var rx_buf: u8[>..] = [];

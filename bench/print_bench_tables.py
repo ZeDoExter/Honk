@@ -3,7 +3,7 @@
 import json
 import statistics
 
-d = json.load(open("bench/phase3_results.json"))
+d = json.load(open("bench/bench_compete_results.json"))
 for w in ("W1", "W2", "W3", "W4"):
     print(f"== {w} rps R1..R5 ==")
     for k, runs in d["runs"][w].items():

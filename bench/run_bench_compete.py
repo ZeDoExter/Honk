@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Phase 3 cross-framework benchmark (Release builds, single-core pinned).
+Cross-framework benchmark (Release builds, single-core pinned).
 
-Re-runnable on any Linux box with one command: python3 bench/run_phase3.py
+Re-runnable on any Linux box with one command: python3 bench/run_bench_compete.py
 (from the repo root; contenders must be built/installed first, see README).
 
 Contenders x Workloads:
@@ -25,7 +25,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_step1b_interleaved import (  # noqa: E402
+from run_bench_transport import (  # noqa: E402
     CLK_TCK, PIDSTAT_BIN, WRK_BIN, parse_pidstat_averages, parse_wrk_output,
     read_proc_cpu_ticks, summarize_runs, wait_for_port,
 )
@@ -39,7 +39,7 @@ CONTENDERS = [
      "dir": ROOT, "cmd": ["./bench/c_control/server_c", "{port}"],
      "env": {}, "workloads": [1]},
     {"key": "honk", "label": "Honk (Goose)", "tier": "native",
-     "dir": ROOT, "cmd": ["./src/server_phase2", "{port}", "30000", "10000", "1", "1"],
+     "dir": ROOT, "cmd": ["./src/server", "{port}", "30000", "10000", "1", "1"],
      "env": {}, "workloads": [1, 2, 3, 4]},
     {"key": "axum", "label": "Rust Axum", "tier": "native",
      "dir": os.path.join(COMP, "rust-axum"),
@@ -330,7 +330,7 @@ def du_bytes(path):
 def measure_footprint():
     fp = {}
     fp["c_control"] = {"kind": "binary", "bytes": du_bytes(f"{ROOT}/bench/c_control/server_c")}
-    fp["honk"] = {"kind": "binary", "bytes": du_bytes(f"{ROOT}/src/server_phase2")}
+    fp["honk"] = {"kind": "binary", "bytes": du_bytes(f"{ROOT}/src/server")}
     fp["axum"] = {"kind": "binary",
                   "bytes": du_bytes(f"{COMP}/rust-axum/target/release/axum-bench")}
     fp["go"] = {"kind": "binary", "bytes": du_bytes(f"{COMP}/go-std/server")}
@@ -361,7 +361,7 @@ def main():
         runs = benchmark_workload(wid, ports)
         results["runs"][f"W{wid}"] = runs
         results["summaries"][f"W{wid}"] = {k: summarize_runs(v) for k, v in runs.items()}
-        with open("bench/phase3_results.partial.json", "w") as f:
+        with open("bench/bench_compete_results.partial.json", "w") as f:
             json.dump(results, f, indent=2)
     print("\n=== RSS matrix (idle / 64 / 512+load) ===")
     for c in CONTENDERS:
@@ -372,7 +372,7 @@ def main():
     for k, v in results["footprint"].items():
         print(f"  {k:10s}: {v['bytes']/1048576:8.2f} MiB ({v['kind']})")
 
-    with open("bench/phase3_results.json", "w") as f:
+    with open("bench/bench_compete_results.json", "w") as f:
         json.dump(results, f, indent=2)
 
     print("\n=== Throughput medians (req/s, 5 rounds) ===")

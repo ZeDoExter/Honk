@@ -53,17 +53,17 @@ inline fn h_hello(c: Ctx&, body_buf: u8[>..]&) {
 ## Build, test, deploy
 
 ```sh
-# Framework demo server (all routes + Phase 3 bench mode via argv[5]=1):
-./goose_repo/build-linux/goose build src/server_phase2.goose -o /tmp/honk
+# Framework demo server (all routes + cross-framework bench mode via argv[5]=1):
+./goose_repo/build-linux/goose build src/server.goose -o /tmp/honk
 /tmp/honk 18080 30000 10000 1              # port, idle_ms, header_ms, workers
 
 # Regression (WSL2/Linux): 900k stack-discipline turns + correctness suites
 ./test/test_stack_discipline
-python3 test/test_phase1_correctness.py ./src/server_phase1
-python3 test/test_phase2_framework.py ./src/server_phase2 18210 Release
+python3 test/test_transport.py ./src/server_minimal
+python3 test/test_framework.py ./src/server 18210 Release
 
 # Hardened build (ASan + UBSan + LSan; must exit 0 with zero findings):
-./goose_repo/build-linux/goose -o /tmp/honk.c --standalone src/server_phase2.goose
+./goose_repo/build-linux/goose -o /tmp/honk.c --standalone src/server.goose
 gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
   -Isrc/shim -Igoose_repo/src/runtime /tmp/honk.c \
   src/shim/honk_shim.c src/shim/picohttpparser.c -o /tmp/honk_asan -lm -pthread -ldl
@@ -78,7 +78,7 @@ Caddy); Honk speaks plain HTTP/1.1 with keep-alive + pipelining.
 10-framework shootout, single core pinned (`taskset -c 0`, 1 worker each),
 `wrk -t2 -c64 -d5s` on sibling cores, 5 interleaved rounds, medians.
 **WSL2 indicative** — ratios are the robust readout; re-run on bare metal with
-`python3 bench/run_phase3.py`. Full methodology + versions + round data:
+`python3 bench/run_bench_compete.py`. Full methodology + versions + round data:
 [`docs/phase3-report.md`](docs/phase3-report.md).
 
 **Throughput, `req/s` (median of 5)**

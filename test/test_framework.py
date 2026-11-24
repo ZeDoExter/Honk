@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 2 framework correctness suite (Release + ASan+UBSan+LSan).
+Framework correctness suite (Release + ASan+UBSan+LSan).
 
 Covers: static routes + /plaintext byte shape, :params (single + multi),
 query parsing, case-insensitive request headers, custom response headers,
@@ -419,7 +419,7 @@ def check_no_sanitizer_errors(stderr_path, label):
 
 
 def test_10_two_workers(server_bin, port, label):
-    err_path = f"/tmp/p2_{label}_w2_stderr.txt"
+    err_path = f"/tmp/honkfw_{label}_w2_stderr.txt"
     with open(err_path, "wb") as err_fh:
         proc = subprocess.Popen([server_bin, str(port), "30000", "10000", "2"],
                                 stdout=subprocess.PIPE, stderr=err_fh)
@@ -491,8 +491,8 @@ def test_10_two_workers(server_bin, port, label):
 
 
 def run_suite(server_bin, base_port, label):
-    print(f"=== Running Phase 2 Framework Suite [{label}] ({server_bin}) ===")
-    err_path = f"/tmp/p2_{label}_stderr.txt"
+    print(f"=== Running Framework Suite [{label}] ({server_bin}) ===")
+    err_path = f"/tmp/honkfw_{label}_stderr.txt"
     with open(err_path, "wb") as err_fh:
         proc = subprocess.Popen([server_bin, str(base_port), "30000", "10000", "1"],
                                 stdout=subprocess.PIPE, stderr=err_fh)
@@ -522,11 +522,11 @@ def run_suite(server_bin, base_port, label):
                 proc.wait()
     check_no_sanitizer_errors(err_path, label)
     test_10_two_workers(server_bin, base_port + 50, label)
-    print(f"=== ALL 10 PHASE 2 TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 10 FRAMEWORK TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "./src/server_phase2"
+    binary = sys.argv[1] if len(sys.argv) > 1 else "./src/server"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 18210
     label = sys.argv[3] if len(sys.argv) > 3 else "Release"
     run_suite(binary, port, label)
