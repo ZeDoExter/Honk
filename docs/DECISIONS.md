@@ -68,3 +68,11 @@
 ## D-007: Hot-Path Exemption for `/` and `/plaintext` (Byte-Compatibility)
 - **Context**: The Phase 2 vs bare-C interleave requires `curl -i` byte-identical 115-byte `GET /plaintext` responses, but global middleware stages extra headers (`X-MW-1/2`, `X-Worker`).
 - **Decision**: Middleware still RUNS on `/` and `/plaintext` (two slice compares + auth path check) but stages no headers there, keeping responses byte-identical to Phase 1 / the C control while the measured `User CPU/req` honestly includes middleware execution. All other routes carry the injected headers.
+
+## D-008: Phase 3 Bench Mode (`HONK_BENCH_MODE`, Worker-TLS Flag)
+- **Context**: Cross-framework workloads need exact bodies on standard paths (`/json` -> exactly `{"message":"Hello, World!"}`, `/users/:id` -> `{"id","role"}` + only `X-Frame-Bench`, `POST /users` -> validate -> `201`/`400`), while Phase 2 routes on the same paths return different shapes.
+- **Decision**: A worker-TLS global set from `argv[5]` selects bench behavior inside the existing dispatch (one predictable branch per affected route). Default mode (`0`) is behavior-identical to Phase 2 — all Phase 1/2 tests run unmodified with the flag off. Bench mode replaces the decoration middleware chain with the single `mw_bench` W3 hook only.
+
+## D-009: `src/` Package Layout (One Directory Per Framework Module)
+- **Context**: Goose packages need a directory of their own: a root file cannot import several modules from one directory (`import honk_net from "../../src"` + `import honk_ctx from "../../src"` is rejected), and there is no re-export, so external apps (and `examples/quickstart/`) could not use a flat `src/*.goose` framework.
+- **Decision**: `src/honk_net/`, `src/honk_ctx/`, `src/honk_json/`, `src/honk_router/` — each a Goose package. Roots declare packages (`import honk_net from "./honk_net";`); framework files reference each other bare (`import honk_net;`, resolved from root declarations). Shim C stays in root `.build` files. Verified by full regression (900k turns, Phase 1 9/9, Phase 2 10/10 Release + ASan).

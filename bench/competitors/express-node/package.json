@@ -1,0 +1,8 @@
+{
+  "name": "express-bench",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "express": "^4.0.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "fastify-bench",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "fastify": "^5.0.0"
+  }
+}

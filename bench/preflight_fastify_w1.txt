@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 13
+Date: Tue, 24 Nov 2026 14:34:47 GMT
+Connection: keep-alive
+Keep-Alive: timeout=72
+
+Hello, World!

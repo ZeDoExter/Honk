@@ -9,9 +9,16 @@
 
 import std;
 import json;
-import .honk_net;
-import .honk_ctx;
-import .honk_json;
+import honk_net;
+import honk_ctx;
+import honk_json;
+
+// Phase 3 cross-framework bench mode (worker-TLS global, set from argv):
+// workload-exact routes on standard paths (/json -> {"message":...},
+// /users/:id -> {"id","role"} + X-Frame-Bench, POST /users -> validate + 201)
+// with Phase 2 decoration middleware disabled. Default false: Phase 1/2
+// behavior bit-identical.
+var HONK_BENCH_MODE: bool = false;
 
 // --- zero-alloc route matchers (views into path, no copies) ---
 
@@ -114,6 +121,16 @@ inline fn mw_after(c: Ctx&, tmp: u8[>..]&) {
     c.set_header("X-Worker", tmp[start..]);
 }
 
+// Bench-mode W3 middleware: stages exactly one hook header on the dynamic
+// user route shape (/users/:id). Runs instead of mw_first/mw_second/mw_after
+// when HONK_BENCH_MODE is set, so W1/W2/W4 carry no decoration headers.
+inline fn mw_bench(c: Ctx&) {
+    let _, ok = match_1param(c.path, "/users/");
+    if ok {
+        c.set_header("X-Frame-Bench", "1");
+    }
+}
+
 // --- handlers (stage into ctx; dispatch emits centrally) ---
 
 inline fn h_plaintext(c: Ctx&) {
@@ -121,8 +138,37 @@ inline fn h_plaintext(c: Ctx&) {
 }
 
 inline fn h_json(c: Ctx&, body_buf: u8[>..]&) {
-    emit_hello_json(body_buf);
+    if HONK_BENCH_MODE {
+        emit_bench_msg(body_buf);   // W2: exactly {"message":"Hello, World!"}
+    } else {
+        emit_hello_json(body_buf);
+    }
     c.json_body(200, body_buf);
+}
+
+inline fn h_bench_user(c: Ctx&, body_buf: u8[>..]&) {
+    // W3: {"id":"<id>","role":"<role>"}; X-Frame-Bench staged by mw_bench.
+    let id = c.param(0);
+    let role, rok = c.query("role");
+    if rok {
+        emit_bench_user(body_buf, id, role);
+    } else {
+        emit_bench_user(body_buf, id, "");
+    }
+    c.json_body(200, body_buf);
+}
+
+inline fn h_bench_create(c: Ctx&, body_buf: u8[>..]&, scratch: u8[>..]&) {
+    // W4: validate {name non-empty str, age int, active bool} -> 201/400.
+    var t = BenchUser { name: "", .. };
+    var r = json::reader(c.body);
+    let ok = parse_bench_user(r, scratch, t);
+    if !ok || t.name.len == 0 {
+        c.text(400, "Bad Request");
+        return;
+    }
+    emit_bench_created(body_buf, t);
+    c.json_body(201, body_buf);
 }
 
 inline fn h_user(c: Ctx&, body_buf: u8[>..]&) {
@@ -287,7 +333,11 @@ inline fn dispatch_get(c: Ctx&, body_buf: u8[>..]&, fd: i32) {
     if ok1 {
         c.params[0] = p0;
         c.n_params = 1;
-        h_user(c, body_buf);
+        if HONK_BENCH_MODE {
+            h_bench_user(c, body_buf);   // W3: {"id","role"}
+        } else {
+            h_user(c, body_buf);
+        }
         return;
     }
     let o, r, ok2 = match_org_repo(c.path);
@@ -306,11 +356,18 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
                    doc: json::Node[>..]&, decoded: u8[>..]&,
                    fd: i32) -> bool {
     // Before-middleware chain (execution order: first, second, auth).
-    mw_first(c);
-    mw_second(c);
+    // Bench mode swaps decoration middleware for the single W3 hook header.
+    if HONK_BENCH_MODE {
+        mw_bench(c);
+    } else {
+        mw_first(c);
+        mw_second(c);
+    }
     if !mw_auth(c) {
         c.text(c.status, status_text(c.status));
-        mw_after(c, body_buf);
+        if !HONK_BENCH_MODE {
+            mw_after(c, body_buf);
+        }
         c.emit(out, date);
         return false;
     }
@@ -318,7 +375,9 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
     if c.method == "GET" || c.head_only {
         dispatch_get(c, body_buf, fd);
     } else if c.method == "POST" {
-        if c.path == "/echo" {
+        if c.path == "/users" && HONK_BENCH_MODE {
+            h_bench_create(c, body_buf, scratch);   // W4: validate -> 201/400
+        } else if c.path == "/echo" {
             h_echo(c);
         } else if c.path == "/api/typed" {
             h_typed(c, body_buf, scratch);
@@ -357,7 +416,10 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
     }
 
     // After-middleware, then the single central emit.
-    mw_after(c, body_buf);
+    // (Bench mode stages nothing here: W3's hook header comes from mw_bench.)
+    if !HONK_BENCH_MODE {
+        mw_after(c, body_buf);
+    }
     c.emit(out, date);
     return !c.keep_alive;
 }

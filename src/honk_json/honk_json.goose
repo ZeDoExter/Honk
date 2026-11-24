@@ -164,3 +164,70 @@ fn emit_hello_json(out: u8[>..]&) {
     json::format_string(out, "honk");
     out.append("]}}");
 }
+
+// --- Phase 3 cross-framework workloads (TechEmpower-shaped, exact bodies) ---
+
+// W2: serialize {"message":"Hello, World!"} dynamically per request.
+fn emit_bench_msg(out: u8[>..]&) {
+    out.push('{');
+    json::format_key(out, "message");
+    json::format_string(out, "Hello, World!");
+    out.push('}');
+}
+
+// W3: serialize {"id":"<id>","role":"<role>"} per request.
+fn emit_bench_user(out: u8[>..]&, id: const u8[:], role: const u8[:]) {
+    out.push('{');
+    json::format_key(out, "id");
+    json::format_string(out, id);
+    out.push(',');
+    json::format_key(out, "role");
+    json::format_string(out, role);
+    out.push('}');
+}
+
+struct BenchUser {
+    name: const u8[:],
+    has_name: bool,
+    age: i64,
+    has_age: bool,
+    active: bool,
+    has_active: bool,
+}
+
+// W4: strict parse of {name: string, age: int, active: bool}; unknown keys
+// skipped. False on malformed JSON, trailing tokens, type mismatch, or any
+// missing required field. Caller additionally rejects empty names.
+fn parse_bench_user(r: json::Reader&, scratch: u8[>..]&, t: BenchUser&) -> bool {
+    json::each_member(r) { key =>
+        if key == "name" {
+            t.name = json::read_string(r, scratch);
+            t.has_name = true;
+        } else if key == "age" {
+            t.age = json::read_int(r);
+            t.has_age = true;
+        } else if key == "active" {
+            t.active = json::read_bool(r);
+            t.has_active = true;
+        } else {
+            json::skip(r);
+        }
+    };
+    if !json::finish(r) { return false; }
+    if !t.has_name || !t.has_age || !t.has_active { return false; }
+    return true;
+}
+
+// W4: serialize {"created":true,"name":"<name>","age":<age>} per request.
+fn emit_bench_created(out: u8[>..]&, t: BenchUser&) {
+    out.push('{');
+    json::format_key(out, "created");
+    json::format_bool(out, true);
+    out.push(',');
+    json::format_key(out, "name");
+    json::format_string(out, t.name);
+    out.push(',');
+    json::format_key(out, "age");
+    json::format_int(out, t.age);
+    out.push('}');
+}

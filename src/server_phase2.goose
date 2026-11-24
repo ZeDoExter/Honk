@@ -1,12 +1,14 @@
-// server_phase2.goose -- Phase 2 Honk framework server.
-// Usage: ./server_phase2 [port] [idle_timeout_ms] [header_timeout_ms] [num_workers]
+// server_phase2.goose -- Phase 2 Honk framework server (+ Phase 3 bench mode).
+// Usage: ./server_phase2 [port] [idle_timeout_ms] [header_timeout_ms] [num_workers] [bench_mode]
 // Same transport/worker model as Phase 1; requests dispatch through the
 // honk_router framework (Ctx + middleware + routes + JSON).
 
 import std;
 import os;
-import .honk_net;
-import .honk_router;
+import honk_net from "./honk_net";
+import honk_router from "./honk_router";
+import honk_ctx from "./honk_ctx";
+import honk_json from "./honk_json";
 
 struct WorkerCfg2 {
     port: i32,
@@ -14,9 +16,11 @@ struct WorkerCfg2 {
     header_timeout_ms: i32,
     worker_id: i32,
     cpu_id: i32,
+    bench: i32,
 }
 
 thread_fn worker_phase2(cfg: WorkerCfg2) {
+    HONK_BENCH_MODE = cfg.bench != 0;
     honk_pin_thread_cpu(cfg.worker_id, cfg.cpu_id);
     honk_set_timeouts(cfg.idle_timeout_ms, cfg.header_timeout_ms);
     guard honk_worker_init(cfg.port) == 0 else { abort("honk_worker_init failed"); }
@@ -45,6 +49,7 @@ fn main() {
     var idle_timeout_ms: i32 = 30000;
     var header_timeout_ms: i32 = 10000;
     var num_workers: i32 = 1;
+    var bench: i32 = 0;
 
     let a = args();
     if a.len > 1 {
@@ -63,14 +68,18 @@ fn main() {
         let v, ok = parse_int(a[4]);
         if ok { num_workers = v as! i32; }
     }
+    if a.len > 5 {
+        let v, ok = parse_int(a[5]);
+        if ok { bench = v as! i32; }
+    }
     assert(num_workers >= 1 && num_workers <= 4);
 
     print("Honk Phase 2 server listening on port ", port,
           " (workers=", num_workers,
           ", idle_timeout_ms=", idle_timeout_ms,
-          ", header_timeout_ms=", header_timeout_ms, ")");
+          ", header_timeout_ms=", header_timeout_ms,
+          ", bench=", bench, ")");
     flush_stdout();
-
     var tids: i64[..4] = [];
     for w in num_workers {
         // Physical core mapping on 4C/8T WSL2 (lscpu -e):
@@ -82,6 +91,7 @@ fn main() {
             header_timeout_ms: header_timeout_ms,
             worker_id: w,
             cpu_id: cpu_id,
+            bench: bench,
         };
         tids.push(thread_spawn(worker_phase2, cfg));
     }

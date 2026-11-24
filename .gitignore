@@ -20,3 +20,10 @@ src/spike/verify_rref
 src/spike/spike_d1
 src/spike/spike_d2
 src/spike/spike_d3
+examples/quickstart/app
+examples/quickstart/app_asan
+bench/competitors/rust-axum/target/
+bench/competitors/go-std/server
+bench/competitors/*/node_modules/
+bench/competitors/fastapi-py/venv/
+bench/__pycache__/
