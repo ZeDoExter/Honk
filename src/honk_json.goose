@@ -46,9 +46,10 @@ fn parse_typed_fields(r: json::Reader&, scratch: u8[>..]&, t: TypedPost&) -> boo
             t.has_score = true;
         } else if key == "tags" {
             json::each_element(r) {
-                if t.n_tags < 8 {
-                    t.tags[t.n_tags] = json::read_string(r, scratch);
-                    t.n_tags++;
+                let nt = t.n_tags;
+                if nt < 8 {
+                    t.tags[nt] = json::read_string(r, scratch);
+                    t.n_tags = nt + 1;
                 } else {
                     json::skip(r);
                 }

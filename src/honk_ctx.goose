@@ -193,7 +193,9 @@ fn emit(c: Ctx&, out: u8[>..]&, date: const u8[:]) {
     out.append("\r\nDate: ");
     out.append(date);
     assert(c.n_extra <= 8);
-    for i in c.n_extra {
+    let n_ex = c.n_extra;
+    assert(n_ex <= 8);
+    for i in n_ex {
         out.append("\r\n");
         out.append(c.extras[i].name);
         out.append(": ");
