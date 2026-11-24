@@ -1,0 +1,10 @@
+goose_repo/
+build/
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.so
+*.dll
+*.dylib
