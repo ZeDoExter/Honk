@@ -34,11 +34,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <limits.h>
 #include <sys/epoll.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-
 #define HONK_MAX_EVENTS       256
 #define HONK_MAX_CONNS        4096
 #define HONK_MAX_FD           16384
@@ -82,6 +84,12 @@ typedef struct {
     size_t pending_tx_cap;
     int64_t last_active_ms;
     int64_t rx_start_ms;
+    /* Phase 5 zero-copy static files: at most one active sendfile per conn.
+     * file_remain > 0 means file_fd is open and owned by this slot. */
+    int sendfile_fd;
+    int _file_pad;
+    int64_t sendfile_off;
+    int64_t sendfile_remain;
 } honk_conn_t;
 
 /* Per-worker thread-local state (Amendment B: zero mutable shared globals) */
@@ -147,6 +155,15 @@ static void close_conn_fd(int fd) {
     c->pending_tx_len = 0;
     c->pending_tx_cap = 0;
 
+    /* Deterministic sendfile fd cleanup: every open is closed exactly once,
+     * on completion (fast path / resume), error, timeout, or shutdown. */
+    if (c->sendfile_remain > 0 && c->sendfile_fd >= 0) {
+        close(c->sendfile_fd);
+    }
+    c->sendfile_fd = -1;
+    c->sendfile_off = 0;
+    c->sendfile_remain = 0;
+
     c->active = 0;
     c->close_after_tx = 0;
     c->fd = -1;
@@ -166,7 +183,40 @@ static void mod_conn_epoll(honk_conn_t *c, uint32_t events) {
     }
 }
 
-/* Attempt to drain pending_tx on EPOLLOUT or after queuing.
+/* Push file bytes via sendfile() until done or EAGAIN. fd is the socket.
+ * Returns 1 if more remains (EPOLLOUT armed), 0 if complete (file_fd closed
+ * here), -1 if the connection was closed on fatal error. */
+static int sendfile_push(honk_conn_t *c) {
+    while (c->sendfile_remain > 0) {
+        off_t off = (off_t)c->sendfile_off;
+        /* Cap single calls at 1 MiB so one huge file cannot monopolize a turn. */
+        size_t chunk = (size_t)c->sendfile_remain;
+        if (chunk > (size_t)1048576) chunk = (size_t)1048576;
+        ssize_t n = sendfile(c->fd, c->sendfile_fd, &off, chunk);
+        if (n > 0) {
+            c->sendfile_off += (int64_t)n;
+            c->sendfile_remain -= (int64_t)n;
+            c->last_active_ms = tls_now_ms;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            mod_conn_epoll(c, EPOLLIN | EPOLLOUT | EPOLLRDHUP);
+            return 1;
+        }
+        /* n == 0 (truncated?) or fatal error: close everything cleanly. */
+        close_conn_fd(c->fd);
+        return -1;
+    }
+    close(c->sendfile_fd);
+    c->sendfile_fd = -1;
+    c->sendfile_off = 0;
+    c->sendfile_remain = 0;
+    return 0;
+}
+
+/* Attempt to drain pending_tx on EPOLLOUT or after queuing, then resume any
+ * active sendfile (headers always precede file bytes on the wire).
  * Returns 0 if connection remains open, -1 if connection was closed. */
 static int flush_pending_tx(int fd) {
     if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns) return -1;
@@ -196,6 +246,12 @@ static int flush_pending_tx(int fd) {
         c->pending_tx_off = 0;
         c->pending_tx_len = 0;
         c->pending_tx_cap = 0;
+    }
+
+    /* Headers fully flushed: resume file bytes, if any. */
+    if (c->sendfile_remain > 0) {
+        int r = sendfile_push(c);
+        if (r != 0) return r;   /* 1 = armed for EPOLLOUT, -1 = closed */
     }
 
     if (c->close_after_tx) {
@@ -354,6 +410,9 @@ int32_t honk_wait(int32_t *out_fds, uint8_t *out_date29, int32_t timeout_ms) {
                 c->pending_tx_off = 0;
                 c->pending_tx_len = 0;
                 c->pending_tx_cap = 0;
+                c->sendfile_fd = -1;
+                c->sendfile_off = 0;
+                c->sendfile_remain = 0;
                 c->last_active_ms = tls_now_ms;
                 c->rx_start_ms = 0;
 
@@ -673,6 +732,82 @@ int32_t honk_send(int32_t fd, sl_u8_shim data) {
     return (int32_t)data.len;
 }
 
+/* Phase 5 static files: secure open + size + zero-copy send.
+ *
+ * honk_file_open(root, rel): opens root/rel read-only. rel must already be
+ * validated by the caller (relative, decoded, no NUL/backslash/.. segments).
+ * O_NOFOLLOW rejects symlinks; fstat requires a regular file. Returns the fd
+ * (>= 0, owned by the caller) or -1.
+ */
+int32_t honk_file_open(sl_u8_shim root, sl_u8_shim rel) {
+    if (root.len <= 0 || rel.len <= 0) return -1;
+    if (root.len + rel.len + 2 > 4096) return -1;
+    /* Defensive re-checks (Goose validates first; never trust across FFI). */
+    for (int64_t i = 0; i < rel.len; i++) {
+        if (rel.data[i] == '\0' || rel.data[i] == '\\') return -1;
+    }
+    if (rel.data[0] == '/') return -1;
+    char path[4096];
+    memcpy(path, root.data, (size_t)root.len);
+    path[root.len] = '/';
+    memcpy(path + root.len + 1, rel.data, (size_t)rel.len);
+    path[root.len + 1 + rel.len] = '\0';
+    /* O_NONBLOCK: opening a FIFO for read would block forever (DoS); fstat
+     * below rejects anything that is not a regular file anyway. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return -1;
+    }
+    return (int32_t)fd;
+}
+
+/* Size of an open regular file, or -1. */
+int64_t honk_file_size(int32_t file_fd) {
+    if (file_fd < 0) return -1;
+    struct stat st;
+    if (fstat(file_fd, &st) < 0 || !S_ISREG(st.st_mode)) return -1;
+    return (int64_t)st.st_size;
+}
+
+void honk_file_close(int32_t file_fd) {
+    if (file_fd >= 0) close(file_fd);
+}
+
+/* Queue file bytes behind any pending headers and push via sendfile().
+ * The turn MUST have flushed earlier tx_buf bytes first (headers precede
+ * file bytes). At most one active transfer per connection: a second file
+ * while one is in flight closes the connection cleanly (documented).
+ * Returns 0 (accepted: sent or resumed via EPOLLOUT), -1 (closed).
+ * Ownership: once accepted with remain > 0 the conn owns file_fd; it is
+ * closed exactly once (on completion, error, timeout, or shutdown).
+ */
+int32_t honk_sendfile_data(int32_t fd, int32_t file_fd, int64_t count) {
+    if (count <= 0 || file_fd < 0) {
+        if (file_fd >= 0) close(file_fd);
+        return 0;
+    }
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) {
+        close(file_fd);
+        return -1;
+    }
+    honk_conn_t *c = &tls_conns[fd];
+    if (c->sendfile_remain > 0) {
+        /* Pipelined second file under backpressure: close cleanly. */
+        close(file_fd);
+        close_conn_fd(fd);
+        return -1;
+    }
+    c->sendfile_fd = file_fd;
+    c->sendfile_off = 0;
+    c->sendfile_remain = count;
+    /* Headers (pending_tx) always flush first; then file bytes. */
+    if (flush_pending_tx(fd) < 0) return -1;
+    return 0;
+}
+
 /* Complete the turn for fd: stash any unparsed tail in c->partial_rx (lazily allocated),
  * handle connection close, and ALWAYS reset rx_buf.stk->top back to rx_buf.hdr->base. */
 void honk_conn_finish(int32_t fd, gs_rref rx_buf, int32_t consumed, int32_t close_conn) {
@@ -687,7 +822,8 @@ void honk_conn_finish(int32_t fd, gs_rref rx_buf, int32_t consumed, int32_t clos
     honk_conn_t *c = &tls_conns[fd];
     if (close_conn) {
         honk_rref_reset(rx_buf);
-        if (c->pending_tx && c->pending_tx_off < c->pending_tx_len) {
+        if ((c->pending_tx && c->pending_tx_off < c->pending_tx_len) ||
+            c->sendfile_remain > 0) {
             c->close_after_tx = 1;
         } else {
             close_conn_fd(fd);
@@ -811,6 +947,9 @@ int32_t honk_test_register_fd(int32_t cfd, int32_t with_partial_rx, int32_t forc
         c->pending_tx_off = 0;
         c->pending_tx_len = 0;
         c->pending_tx_cap = 0;
+        c->sendfile_fd = -1;
+        c->sendfile_off = 0;
+        c->sendfile_remain = 0;
         c->last_active_ms = tls_now_ms;
         c->rx_start_ms = 0;
         tls_active_conns++;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""./honk — the Honk developer CLI (doctor/new/dev/build/test).
+"""./honk — the Honk developer CLI (setup/doctor/new/dev/build/test).
 
 Zero dependencies beyond Python 3. Run from anywhere; HONK_ROOT resolves to
 this file's directory (override with $HONK_ROOT).
@@ -50,7 +50,69 @@ def cmd_doctor(_args):
     has_wrk = os.path.isfile(wrk) if wrk else False
     print(f"  [{'OK' if has_wrk else 'opt.'}] wrk load generator"
           + ("" if has_wrk else " — needed only for bench/ (cargo install wrk)"))
+    sys_sqlite = os.path.isfile("/usr/include/sqlite3.h")
+    usr_sqlite = os.path.isfile(os.path.expanduser("~/.local/sqlite3/usr/include/sqlite3.h"))
+    print(f"  [{'OK' if sys_sqlite or usr_sqlite else 'opt.'}] sqlite3 dev files"
+          + (" (system)" if sys_sqlite else " (~/.local)" if usr_sqlite else
+             " — needed only for SQLite apps (apt install libsqlite3-dev)"))
     return 0 if ok else 1
+
+
+PINNED_GOOSE = "2239b92eb2ae0e8f390f98640b09ff57a17698fc"
+GOOSE_UPSTREAM = "https://github.com/aardappel/goose.git"
+
+
+def git_head(repo):
+    try:
+        r = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def cmd_setup(_args):
+    """Fresh-clone bootstrap: fetch + pin + build Goose, then verify."""
+    if IS_WIN:
+        print("Windows native setup is not automated: install MSVC + CMake,",
+              "build goose_repo/ manually, or (recommended) use WSL2 and re-run",
+              "./honk setup there.", file=sys.stderr)
+        return 1
+    repo = os.path.join(HONK_ROOT, "goose_repo")
+    want_bin = os.path.join(repo, "build-linux", "goose")
+    if os.path.isfile(want_bin) and git_head(repo) == PINNED_GOOSE:
+        print("goose already built at pinned commit; verifying...")
+        return cmd_doctor([])
+    for tool, pkg in (("git", "git"), ("cmake", "cmake"),
+                      ("g++", "g++"), ("python3", "python3")):
+        if not shutil.which(tool):
+            print(f"missing {tool}: run",
+                  "'sudo apt-get install -y git cmake g++ python3 make' first",
+                  file=sys.stderr)
+            return 1
+    if not os.path.isdir(os.path.join(repo, ".git")):
+        print(f"cloning {GOOSE_UPSTREAM} ...")
+        r = run(["git", "clone", GOOSE_UPSTREAM, repo])
+        if r.returncode != 0:
+            return 1
+    if git_head(repo) != PINNED_GOOSE:
+        print(f"checking out pinned goose {PINNED_GOOSE[:9]} ...")
+        if run(["git", "-C", repo, "fetch", "origin"]).returncode != 0:
+            return 1
+        if run(["git", "-C", repo, "checkout", PINNED_GOOSE]).returncode != 0:
+            print("checkout failed (local changes in goose_repo?)",
+                  file=sys.stderr)
+            return 1
+    jobs = str(os.cpu_count() or 4)
+    print("configuring goose (cmake) ...")
+    if run(["cmake", "-B", "build-linux", "-DCMAKE_BUILD_TYPE=Release"],
+           cwd=repo).returncode != 0:
+        return 1
+    print(f"building goose (-j{jobs}, a few minutes) ...")
+    if run(["cmake", "--build", "build-linux", "--config", "Release",
+            "-j", jobs], cwd=repo).returncode != 0:
+        return 1
+    return cmd_doctor([])
 
 
 SCAFFOLD_MAIN = '''// {name} -- a Honk application.
@@ -173,26 +235,55 @@ def resolve_app(path):
     return app_dir, goose_file, os.path.splitext(os.path.basename(goose_file))[0]
 
 
+def sqlite_env():
+    """CPATH/LIBRARY_PATH for a user-space sqlite3 (no-op if system-wide)."""
+    base = os.path.expanduser("~/.local/sqlite3/usr")
+    inc = os.path.join(base, "include")
+    lib = os.path.join(base, "lib", "x86_64-linux-gnu")
+    env = {}
+    if os.path.isfile(os.path.join(inc, "sqlite3.h")):
+        prev = os.environ.get("CPATH")
+        env["CPATH"] = inc + (":" + prev if prev else "")
+    if os.path.lexists(os.path.join(lib, "libsqlite3.so")):
+        prev = os.environ.get("LIBRARY_PATH")
+        env["LIBRARY_PATH"] = lib + (":" + prev if prev else "")
+    return env
+
+
+def uses_sqlite(goose_file):
+    try:
+        with open(goose_file) as f:
+            return "honk_sqlite" in f.read()
+    except OSError:
+        return False
+
+
 def build_app(goose_file, out_bin, asan=False):
     gb = goose_bin()
     if not gb:
         return False, "goose compiler not found (run ./honk doctor)"
+    env = dict(os.environ)
+    env.update(sqlite_env())
     if not asan:
-        r = run([gb, "build", goose_file, "-o", out_bin], capture=True)
+        r = run([gb, "build", goose_file, "-o", out_bin], capture=True, env=env)
         ok = r.returncode == 0
         return ok, (r.stdout + r.stderr)[-3000:]
     stem = os.path.splitext(out_bin)[0]
     standalone = stem + ".standalone.c"
-    r = run([gb, "-o", standalone, "--standalone", goose_file], capture=True)
+    r = run([gb, "-o", standalone, "--standalone", goose_file], capture=True, env=env)
     if r.returncode != 0:
         return False, (r.stdout + r.stderr)[-3000:]
     shim = os.path.join(HONK_ROOT, "src", "shim")
     rt = os.path.join(HONK_ROOT, "goose_repo", "src", "runtime")
     cc = shutil.which("gcc") or "cc"
+    srcs = [f"{shim}/honk_shim.c", f"{shim}/picohttpparser.c"]
+    libs = ["-lm", "-pthread", "-ldl"]
+    if uses_sqlite(goose_file):
+        srcs.append(f"{shim}/honk_sqlite_shim.c")
+        libs.append("-lsqlite3")
     r = run([cc, "-O2", "-g", "-fsanitize=address,undefined",
              "-fno-sanitize-recover=all", f"-I{shim}", f"-I{rt}", standalone,
-             f"{shim}/honk_shim.c", f"{shim}/picohttpparser.c",
-             "-o", out_bin, "-lm", "-pthread", "-ldl"], capture=True)
+             *srcs, "-o", out_bin, *libs], capture=True, env=env)
     try:
         os.remove(standalone)
     except OSError:
@@ -322,7 +413,9 @@ def cmd_test(_args):
         print("PASS")
 
     def build(goose_src, out):
-        r = run([gb, "build", goose_src, "-o", out], capture=True)
+        env = dict(os.environ)
+        env.update(sqlite_env())
+        r = run([gb, "build", goose_src, "-o", out], capture=True, env=env)
         if r.returncode != 0:
             print((r.stdout + r.stderr)[-2000:])
             raise subprocess.CalledProcessError(r.returncode, goose_src)
@@ -338,12 +431,14 @@ def cmd_test(_args):
         if r.returncode != 0:
             raise subprocess.CalledProcessError(r.returncode, cmd)
 
-    gate("build: server_minimal + server + stack + helpers + quickstart", lambda: [
+    gate("build: servers + stack + helpers + phase5 + quickstart + fullstack", lambda: [
         build("src/server_minimal.goose", "src/server_minimal"),
         build("src/server.goose", "src/server"),
         build("test/test_stack_discipline.goose", "test/test_stack_discipline"),
         build("test/helpers_app.goose", "test/helpers_app"),
+        build("test/phase5_app.goose", "test/phase5_app"),
         build("examples/quickstart/app.goose", "examples/quickstart/app"),
+        build("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app"),
     ])
     gate("stack discipline 900k turns",
          lambda: suite(["./test/test_stack_discipline"]))
@@ -353,23 +448,30 @@ def cmd_test(_args):
          lambda: suite(["python3", "test/test_framework.py", "./src/server", "18210", "Release"]))
     gate("web-helper suite (Release)",
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app", "18420", "Release"]))
-    gate("build: ASan server + helpers",
-         lambda: [build_asan("src/server.goose", "src/server_asan"),
-                  build_asan("test/helpers_app.goose", "test/helpers_app_asan")])
+    gate("build: ASan server + helpers + phase5 + fullstack", lambda: [
+        build_asan("src/server.goose", "src/server_asan"),
+        build_asan("test/helpers_app.goose", "test/helpers_app_asan"),
+        build_asan("test/phase5_app.goose", "test/phase5_app_asan"),
+        build_asan("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app_asan"),
+    ])
     gate("framework suite (ASan+UBSan+LSan)",
          lambda: suite(["python3", "test/test_framework.py", "./src/server_asan", "18310", "ASan"]))
     gate("web-helper suite (ASan+UBSan+LSan)",
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app_asan", "18421", "ASan"]))
+    gate("phase5 fullstack suite (Release)",
+         lambda: suite(["python3", "test/test_phase5_fullstack.py", "./test/phase5_app", "18440", "Release"]))
+    gate("phase5 fullstack suite (ASan+UBSan+LSan)",
+         lambda: suite(["python3", "test/test_phase5_fullstack.py", "./test/phase5_app_asan", "18450", "ASan"]))
 
     print(f"\n{'ALL GREEN' if not fails else 'FAILURES: ' + ', '.join(fails)}")
     return 0 if not fails else 1
 
 
 def main(argv):
-    cmds = {"doctor": cmd_doctor, "setup": cmd_doctor, "new": cmd_new, "init": cmd_new,
+    cmds = {"doctor": cmd_doctor, "setup": cmd_setup, "new": cmd_new, "init": cmd_new,
             "dev": cmd_dev, "build": cmd_build, "test": cmd_test}
     if len(argv) < 2 or argv[1] not in cmds:
-        print("usage: ./honk {doctor|new|dev|build|test} [...]", file=sys.stderr)
+        print("usage: ./honk {setup|doctor|new|dev|build|test} [...]", file=sys.stderr)
         return 2
     return cmds[argv[1]](argv[2:])
 

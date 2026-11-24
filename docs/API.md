@@ -76,6 +76,39 @@ decode/scratch space, `ctx.dom`/`ctx.dstr` = JSON DOM workspace.
 | `json::parse(text, doc, decoded) -> root?, err` | DOM tree into caller stacks; `member`/`as_*`/`each` to inspect |
 | `honk_json`: `parse_typed_fields`, `emit_typed_post`, `parse_bench_user`, `emit_bench_created`, `emit_bench_msg`, `emit_bench_user`, `dom_summary`, `emit_dom_res`, `emit_hello_json` | Demo-app typed bindings/serializers (copy the pattern, don't reuse the demo structs) |
 
+## Static files (`honk_static`)
+
+| Signature | Notes |
+|---|---|
+| `try_serve_file(ctx, root, with_index) -> bool` | `GET`/`HEAD` from `root`: `true` = staged (`200`/`HEAD`/`405`); `false` = miss/traversal/malformed (fall back to `404`/SPA) |
+| `serve_rel(ctx, root, rel, with_index) -> bool` | Same for an explicit rel path (SPA `index.html` fallback) |
+| `mime_for_rel(rel) -> ctype` | Extension table (html/css/js/mjs/json/svg/png/jpg/jpeg/webp/ico/wasm/txt/woff2, else `application/octet-stream`) |
+
+`ctx` carries the staging fields (`resp_hdrs`, `resp_file_fd/n`, `resp_len`,
+`sent`, `date`); the turn sends headers in order then file bytes via
+`sendfile` (`EAGAIN` resumes on `EPOLLOUT`; fd closed exactly once).
+
+## SQLite (`honk_sqlite`, opt-in `-lsqlite3`)
+
+| Signature | Notes |
+|---|---|
+| `struct Db { h }`, `struct Stmt { h }` | Opaque `u64` handles; one `Db` per worker thread |
+| `db_open(path) -> Db, bool` | `READWRITE\|CREATE\|NOMUTEX`; run DDL once in `main` |
+| `db_enable_wal(db) -> bool` | `busy_timeout` first, then `WAL` + `NORMAL` + `foreign_keys` |
+| `db_exec(db, sql) -> bool` | DDL/PRAGMAs (no rows) |
+| `db_close(db) -> bool` | Zeroes the handle |
+| `db_shutdown() -> bool` | Once from `main` after all workers join (LSan-clean) |
+| `db_prepare(db, sql) -> Stmt, bool` | Full-statement prepare |
+| `stmt_step(st) -> i32` | `ROW` (100) / `DONE` (101) / error code |
+| `stmt_reset(st) -> bool` | `reset` + `clear_bindings`; call after EVERY step |
+| `bind_int/bind_float/bind_null(st, idx, v) -> bool` | 1-based params |
+| `bind_text(st, idx, v) -> bool` | `TRANSIENT` (always safe) |
+| `bind_text_static(st, idx, v) -> bool` | `STATIC`: `v` must outlive step+reset |
+| `col_int/col_float(st, idx)` | Typed readers |
+| `col_is_null(st, idx) -> bool` | NULL check |
+| `col_text(st, idx, out) -> range, bool` | Single copy into caller builder (request scope) |
+| `db_last_id(db) -> i64`, `db_changes(db) -> i64` | Insert id / affected rows |
+
 ## Low-level (`honk_net`, rarely needed in apps)
 
 `honk_worker_init/shutdown`, `honk_wait`, `honk_conn_read`, `honk_parse_req`,

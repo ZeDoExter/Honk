@@ -28,6 +28,8 @@ import json;
 import honk_net;
 import honk_ctx;
 
+extern fn honk_sendfile_data(fd: i32, file_fd: i32, count: i64) -> i32;
+
 struct Config {
     port: i32,
     idle_ms: i32 = 30000,
@@ -72,20 +74,24 @@ inline fn serve<F>() {
 }
 
 // Runs one request against a ctx borrowed by reference (blocks bind struct
-// *values* by copy, so the reference must cross through this & param;
-// see probe_reffwd). Stages 404 when the block staged nothing, then emits.
+// *values* by copy, so the reference must cross through this & param).
+// Stages 404 when the block staged nothing. Static responses (ctx.sent)
+// skip emit here: the turn sends their headers + file bytes directly.
 inline fn request_run<F>(ctx: Ctx&, tx_buf: u8[>..]&, date: const u8[:]) {
     F(ctx);
     if !ctx.responded {
         ctx.text(404, "Not Found");
     }
-    ctx.emit(tx_buf, date);
+    if !ctx.sent {
+        ctx.emit(tx_buf, date);
+    }
 }
 
-// One epoll turn: recv(), parse + run every pipelined request through F,
-// send(), stash tails. Per-request builders live in an explicit inner scope
-// so every data-stack top resets on each iteration (same discipline as the
-// hand-written turn this replaces).
+// One epoll turn: recv(), then run + send every pipelined request in order.
+// Each request gets a fresh scope (builders reset per iteration) and is
+// sent immediately, which keeps static file bytes ordered behind their own
+// headers under pipelining (wrk never pipelines, so batching bought nothing
+// measurable; correctness first).
 inline fn request<F>(fd: i32, date: const u8[:]) {
     var rx_buf: u8[>..] = [];
     let base_top = honk_debug_stack_base(rx_buf);
@@ -95,7 +101,6 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
         return;
     }
 
-    var tx_buf: u8[>..] = [];
     var cursor: i32 = 0;
     var close_conn = false;
 
@@ -107,16 +112,19 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
             break;
         }
         if pret < 0 {
-            write_error_response(tx_buf, pret, date);
+            var txe: u8[>..] = [];
+            write_error_response(txe, pret, date);
+            honk_send(fd, txe);
             close_conn = true;
             break;
         }
         {
-            // Per-request scope: all four builders reset at block exit.
+            // Per-request scope: all builders reset at block exit.
             var res_buf: u8[>..] = [];
             var tmp_buf: u8[>..] = [];
             var dom_buf: json::Node[>..] = [];
             var dstr_buf: u8[>..] = [];
+            var tx_buf: u8[>..] = [];
             let method = rem[req.method_off .. req.method_end];
             let full_path = rem[req.path_off .. req.path_end];
             let body = rem[req.body_off .. req.body_end];
@@ -133,9 +141,19 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
             }
             let hdrs = if line_end >= 0 { rem[line_end + 2 .. hb] } else { rem[hb..hb] };
             let ka = req.keep_alive != 0;
-            var ctx = make_ctx(method, full_path, body, hdrs, ka, fd,
+            var ctx = make_ctx(method, full_path, body, hdrs, ka, fd, date,
                                res_buf, tmp_buf, dom_buf, dstr_buf);
             request_run(ctx, tx_buf, date) { c => F(c); };
+            if ctx.sent {
+                // Static: headers now (queued behind any pending bytes),
+                // then file bytes via sendfile (EAGAIN tails resume on
+                // EPOLLOUT). sendfile_data closes file_fd exactly once on
+                // every path, including dead connections.
+                honk_send(fd, ctx.resp_hdrs);
+                honk_sendfile_data(fd, ctx.resp_file_fd, ctx.resp_file_n);
+            } else if tx_buf.len > 0 {
+                honk_send(fd, tx_buf);
+            }
             cursor += req.consumed;
             if !ctx.keep_alive {
                 close_conn = true;
@@ -144,9 +162,6 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
         }
     }
 
-    if tx_buf.len > 0 {
-        honk_send(fd, tx_buf);
-    }
     honk_conn_finish(fd, rx_buf, cursor, if close_conn { 1 } else { 0 });
     assert(honk_debug_stack_top(rx_buf) == base_top);
 }

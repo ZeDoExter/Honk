@@ -45,11 +45,18 @@ struct Ctx {
     extras: RespHdr[8],
     n_extra: i64,
     responded: bool,      // set by every staging helper; turn defaults false -> 404
+    // Static file staging (honk_static): headers slice + open fd + bytes.
+    resp_hdrs: const u8[:],
+    resp_file_fd: i32,     // -1 when no file is staged
+    resp_file_n: i64,
+    resp_len: i64,         // >= 0 overrides Content-Length (HEAD/empty); -1 = body.len
+    sent: bool,            // static response queued for direct send (skip emit)
+    date: const u8[:],     // cached Date header value for this turn
 }
 
 // Build a Ctx from parsed request slices. full_path still carries '?query'.
 fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
-            hdrs: const u8[:], keep_alive: bool, fd: i32,
+            hdrs: const u8[:], keep_alive: bool, fd: i32, date: const u8[:],
             res: u8[>..]&, tmp: u8[>..]&, dom: json::Node[>..]&, dstr: u8[>..]&) -> Ctx {
     var qi = full_path.len;
     for c, i in full_path {
@@ -76,6 +83,12 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
         ctype: "text/plain",
         resp_body: "",
         responded: false,
+        resp_hdrs: "",
+        resp_file_fd: -1,
+        resp_file_n: 0,
+        resp_len: -1,
+        sent: false,
+        date: date,
         ..
     };
 }
@@ -493,7 +506,7 @@ fn emit(c: Ctx&, out: u8[>..]&, date: const u8[:]) {
         out.append("\r\nConnection: close");
     }
     let no_body = c.head_only || c.status == 204;
-    let blen = if c.status == 204 { 0 } else { c.resp_body.len };
+    let blen = if c.status == 204 { 0 } else if c.resp_len >= 0 { c.resp_len } else { c.resp_body.len };
     out.append("\r\nContent-Length: ");
     format(out, blen);
     out.append("\r\n\r\n");

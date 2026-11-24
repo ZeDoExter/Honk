@@ -59,12 +59,13 @@ How it gets there:
 | Doc | For |
 |---|---|
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 5-minute tutorial + Goose cheat sheet |
-| [`docs/GUIDE.md`](docs/GUIDE.md) | Recipes: routing, JSON, auth, CORS, cookies, deploy |
+| [`docs/GUIDE.md`](docs/GUIDE.md) | Recipes: routing, JSON, auth, CORS, cookies, static, SQLite, deploy |
 | [`docs/API.md`](docs/API.md) | Every public function, one table per module |
 | [`examples/quickstart/`](examples/quickstart/) | Full commented example app |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Framework internals + PR checklist |
+| [`examples/fullstack_todo/`](examples/fullstack_todo/) | Single-binary Todo app (sendfile UI + SQLite API) |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architecture decision record (D-001…) |
 | [`docs/phase3-report.md`](docs/phase3-report.md) | 10-framework benchmark report + method |
+| [`docs/phase5-report.md`](docs/phase5-report.md) | Toolchain setup, sendfile, SQLite, full-stack + perf |
 
 ## Build, test, deploy
 
@@ -75,8 +76,8 @@ How it gets there:
 ```
 
 ```sh
-# Docker, no local toolchain (kiri or docker, same syntax):
-kiri build -t honk:quickstart . && kiri run --rm -p 18080:18080 honk:quickstart
+# Docker, no local toolchain:
+docker build -t honk:quickstart . && docker run --rm -p 18080:18080 honk:quickstart
 ```
 
 ### Manual commands (what `./honk` wraps)
@@ -150,12 +151,16 @@ no pre-serialized literals, no strawman configs.
 
 ## Capabilities & roadmap
 
-**Today**: HTTP/1.1 keep-alive + pipelining, zero-copy routing (`:params`, query,
-headers), composable middleware, `HEAD`, stdlib JSON (`Reader` typed binding, DOM
-`parse`, `format_*` emit), strict `400`/`404`/`405` + `413`/`431`/`501` caps, idle +
-slowloris timeouts, `SO_REUSEPORT` multi-worker with CPU pinning, Linux `epoll`.
+**Today**: `./honk` CLI (`setup`/`doctor`/`new`/`dev`/`build`/`test`), one-call
+`honk::serve` API, zero-copy routing (`:params`, typed `param_int`, query +
+percent-decoding, headers), composable middleware, CORS, cookies, bearer auth,
+`HEAD`, stdlib JSON (`Reader` typed binding, DOM `parse`, `format_*` emit),
+kernel-`sendfile` static file serving, opt-in SQLite (WAL + prepared
+statements, zero-copy rows), strict `400`/`404`/`405` + `413`/`431`/`501` caps,
+idle + slowloris timeouts, `SO_REUSEPORT` multi-worker with CPU pinning, Linux
+`epoll`, Docker + GitHub Actions CI.
 
 **Not yet**: TLS (terminate at a reverse proxy), HTTP/2+, chunked request bodies
-(`501`), directory serving / static files, WebSockets. See
-[`docs/DECISIONS.md`](docs/DECISIONS.md) for the architecture record and
-[`docs/phase3-report.md`](docs/phase3-report.md) for benchmark details.
+(`501`), WebSockets. See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the
+architecture record and [`docs/phase3-report.md`](docs/phase3-report.md) for
+benchmark details.

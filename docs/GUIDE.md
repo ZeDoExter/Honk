@@ -152,14 +152,93 @@ ctx.redirect("/login");                  // 302 + Location (or 301)
 ctx.html(200, "<h1>hi</h1>");
 ```
 
+## Static files (kernel sendfile)
+
+```goose
+import honk_static from "/path/to/Honk/src/honk_static";
+
+// in the block (root is borrowed, never copied):
+if (ctx.method == "GET" || ctx.head_only) && try_serve_file(ctx, "public", true) {
+    // 200/HEAD staged: MIME + Content-Length + Date, bytes via sendfile.
+} else if (ctx.method == "GET" || ctx.head_only)
+    && serve_rel(ctx, "public", "index.html", false) {
+    // SPA fallback for unknown GET routes.
+} else {
+    ctx.json_error(404, "not found");
+}
+```
+
+Traversal (`..`), backslashes, NUL bytes, malformed `%XX`, symlinks, and
+non-regular files are rejected (`false` → your `404`); directories resolve
+to `index.html` when enabled; other methods stage `405`. Large files stream
+without blocking the worker (`EAGAIN` + `EPOLLOUT` resume inside the shim).
+
+## SQLite (opt-in, per-worker WAL)
+
+Add the shim + lib to your `.build` (only SQLite apps pay):
+
+```goose
+// myapp.build
+c_sources = ["<honk>/src/shim/honk_shim.c", "<honk>/src/shim/picohttpparser.c",
+             "<honk>/src/shim/honk_sqlite_shim.c"];
+c_include = ["<honk>/src/shim"];
+c_libs = ["sqlite3"];   // needs libsqlite3-dev (or ~/.local/sqlite3)
+```
+
+Open one connection per worker and capture it (with prepared statements) in
+the request block — the worker-state pattern:
+
+```goose
+import honk_sqlite from "/path/to/Honk/src/honk_sqlite";
+
+thread_fn worker(port: i32) {
+    honk::listen_or_abort(port);
+    let db, ok = db_open("app.db");
+    guard ok else { abort("db_open failed"); }
+    guard db_enable_wal(db) else { abort("wal failed"); }  // WAL+NORMAL+5s busy
+    let st_get, gok = db_prepare(db, "SELECT name FROM users WHERE id = ?1;");
+    guard gok else { abort("prepare failed"); }
+    honk::serve() { fd, date =>
+        honk::request(fd, date) { ctx =>
+            if ctx.method == "GET" && ctx.path == "/user" {
+                let id = ctx.query_int_or("id", -1);
+                if id > 0 && bind_int(st_get, 1, id) && stmt_step(st_get) == ROW {
+                    let nm, nok = col_text(st_get, 0, ctx.tmp);
+                    stmt_reset(st_get);
+                    if nok {
+                        ctx.res.append("{\"name\":");
+                        json::format_string(ctx.res, nm);
+                        ctx.res.push('}');
+                        ctx.json_raw(200, ctx.res[..]);
+                    } else {
+                        ctx.json_error(500, "read failed");
+                    }
+                } else {
+                    stmt_reset(st_get);   // reset on EVERY path: reuse invariant
+                    ctx.json_error(404, "not found");
+                }
+            }
+        };
+    };
+    stmt_finalize(st_get);
+    db_close(db);
+}
+```
+
+Rules: run schema DDL once in `main` (concurrent DDL can abort); always
+`stmt_reset` after stepping (even on errors); `bind_text` (transient) by
+default, `bind_text_static` only for static/request lifetimes; call
+`db_shutdown()` in `main` after all workers join. Multi-worker WAL needs a
+POSIX filesystem (not a Windows/9P mount) for the `-shm` file.
+
 ## Production deployment
 
 - **Binary**: `./honk build my-api --release` → `my-api/dist/main`. Ship it as-is
   (libc + pthreads only, ~150 KiB). Run `./main 8080`.
 - **Workers**: spawn N `thread_fn` workers (kernel `SO_REUSEPORT` balances);
   see `src/server.goose` for the pinned multi-worker pattern.
-- **Reverse proxy** (TLS + static files): terminate TLS in nginx/Caddy and proxy
-  plain HTTP/1.1 to Honk. Example nginx:
+- **Reverse proxy** (TLS): terminate TLS in nginx/Caddy and proxy plain
+  HTTP/1.1 to Honk (static assets are served natively via `sendfile`). Example:
   ```nginx
   server {
       listen 443 ssl;  # + certs

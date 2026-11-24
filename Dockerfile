@@ -9,23 +9,19 @@
 # For your own app, copy this file and change the `goose build` line to your
 # root .goose file (keeping the src/ + shim layout it imports).
 
-# ---- builder: toolchain + Goose (pinned) + Honk app ----
+# ---- builder: toolchain + pinned Goose (via ./honk setup) + Honk app ----
 FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git cmake g++ gcc python3 make \
+      ca-certificates git cmake g++ gcc python3 make libsqlite3-dev \
  && rm -rf /var/lib/apt/lists/*
 
-ARG GOOSE_COMMIT=2239b92eb2ae0e8f390f98640b09ff57a17698fc
-RUN git clone https://github.com/aardappel/goose.git /opt/goose \
- && cd /opt/goose && git checkout "${GOOSE_COMMIT}" \
- && cmake -B build -DCMAKE_BUILD_TYPE=Release \
- && cmake --build build --config Release -j"$(nproc)"
-
 WORKDIR /honk
+COPY honk.py honk ./
+RUN ./honk setup
 COPY src/ ./src/
 COPY examples/quickstart/ ./examples/quickstart/
-RUN /opt/goose/build/goose build examples/quickstart/app.goose \
+RUN ./goose_repo/build-linux/goose build examples/quickstart/app.goose \
       -o /honk/app \
  && ls -la /honk/app
 
