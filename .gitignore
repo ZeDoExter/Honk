@@ -8,3 +8,12 @@ build/
 *.so
 *.dll
 *.dylib
+src/server_phase1
+src/server_phase1_asan
+test/test_stack_discipline
+test/test_stack_discipline_asan
+bench/c_control/server_c
+src/spike/verify_rref
+src/spike/spike_d1
+src/spike/spike_d2
+src/spike/spike_d3

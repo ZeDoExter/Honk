@@ -1,0 +1,32 @@
+{
+  "c_control": {
+    "label": "Bare-C Control",
+    "idle": {
+      "VmRSS_kB": 1408,
+      "VmHWM_kB": 1408
+    },
+    "conns_64": {
+      "VmRSS_kB": 1536,
+      "VmHWM_kB": 1536
+    },
+    "conns_1024": {
+      "VmRSS_kB": 1536,
+      "VmHWM_kB": 1536
+    }
+  },
+  "goose_honk": {
+    "label": "Goose Honk (Phase 1)",
+    "idle": {
+      "VmRSS_kB": 1408,
+      "VmHWM_kB": 1408
+    },
+    "conns_64": {
+      "VmRSS_kB": 1408,
+      "VmHWM_kB": 1408
+    },
+    "conns_1024": {
+      "VmRSS_kB": 1408,
+      "VmHWM_kB": 1408
+    }
+  }
+}
