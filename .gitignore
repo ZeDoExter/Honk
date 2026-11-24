@@ -20,8 +20,8 @@ test/helpers_app_asan
 test/phase5_app
 test/phase5_app_asan
 examples/fullstack_todo/app
-examples/fullstack_todo/app_asan
 examples/fullstack_todo/dist/
+todos.db*
 bench/c_control/server_c
 src/spike/verify_rref
 src/spike/spike_d1

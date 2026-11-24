@@ -1,0 +1,86 @@
+{
+  "w1_c": {
+    "rps_median": 148929.08,
+    "rps_min": 126662.14,
+    "rps_max": 158003.89,
+    "cpu_us_per_req_median": 6.762,
+    "cpu_us_per_req_min": 6.386,
+    "cpu_us_per_req_max": 6.838,
+    "user_us_per_req_median": 0.421,
+    "sys_us_per_req_median": 6.234,
+    "server_cpu_pct_median": 100.8,
+    "wrk_cpu_pct_median": 141.5,
+    "any_saturated_by_client": false,
+    "all_saturated_by_client": false
+  },
+  "w1_honk": {
+    "rps_median": 132781.35,
+    "rps_min": 121047.02,
+    "rps_max": 138119.66,
+    "cpu_us_per_req_median": 7.47,
+    "cpu_us_per_req_min": 7.284,
+    "cpu_us_per_req_max": 7.879,
+    "user_us_per_req_median": 0.573,
+    "sys_us_per_req_median": 6.982,
+    "server_cpu_pct_median": 100.5,
+    "wrk_cpu_pct_median": 130.8,
+    "any_saturated_by_client": false,
+    "all_saturated_by_client": false
+  },
+  "static": {
+    "rps_median": 26167.9,
+    "rps_min": 25372.69,
+    "rps_max": 27272.88,
+    "cpu_us_per_req_median": 39.795,
+    "cpu_us_per_req_min": 38.821,
+    "cpu_us_per_req_max": 40.215,
+    "user_us_per_req_median": 1.758,
+    "sys_us_per_req_median": 38.061,
+    "server_cpu_pct_median": 101.8,
+    "wrk_cpu_pct_median": 137.2,
+    "any_saturated_by_client": false,
+    "all_saturated_by_client": false
+  },
+  "sqlite": {
+    "rps_median": 79531.36,
+    "rps_min": 64259.8,
+    "rps_max": 85589.83,
+    "cpu_us_per_req_median": 12.564,
+    "cpu_us_per_req_min": 12.171,
+    "cpu_us_per_req_max": 13.513,
+    "user_us_per_req_median": 3.037,
+    "sys_us_per_req_median": 9.677,
+    "server_cpu_pct_median": 101.2,
+    "wrk_cpu_pct_median": 77.2,
+    "any_saturated_by_client": false,
+    "all_saturated_by_client": false
+  },
+  "rss": {
+    "honk": {
+      "VmRSS_kB": 2048,
+      "VmHWM_kB": 2048
+    },
+    "static": {
+      "VmRSS_kB": 3712,
+      "VmHWM_kB": 3712
+    },
+    "db": {
+      "VmRSS_kB": 3712,
+      "VmHWM_kB": 3712
+    }
+  },
+  "sizes": {
+    "quickstart": {
+      "KiB": 143.9,
+      "libsqlite3": false
+    },
+    "server": {
+      "KiB": 172.4,
+      "libsqlite3": false
+    },
+    "fullstack": {
+      "KiB": 167.0,
+      "libsqlite3": true
+    }
+  }
+}
