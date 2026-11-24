@@ -1,11 +1,9 @@
-// honk_router.goose -- Phase 2 compile-time router, middleware, and handlers.
+// honk_router.goose -- Honk demo dispatch: middleware + routes over honk_ctx.
 //
 // Dispatch-as-code: an inline if/else graph over (method, path) with
 // zero-alloc match helpers. No tables of function pointers, no heap
-// closures; the hot path inlines into the worker's pipelining loop.
-// Per-request buffers (body_buf, scratch, doc, decoded) live in an explicit
-// inner scope per pipelined request so every data-stack top resets on each
-// iteration. Transport (honk_conn_read/send/finish) is Phase 1 untouched.
+// closures; handlers take only `ctx` (buffers ride inside it) and stage
+// responses; the turn runner (`honk_serve`) emits centrally.
 
 import std;
 import json;
@@ -13,25 +11,13 @@ import honk_net;
 import honk_ctx;
 import honk_json;
 
-// Phase 3 cross-framework bench mode (worker-TLS global, set from argv):
+// Cross-framework bench mode (worker-TLS global, set from argv):
 // workload-exact routes on standard paths (/json -> {"message":...},
 // /users/:id -> {"id","role"} + X-Frame-Bench, POST /users -> validate + 201)
-// with Phase 2 decoration middleware disabled. Default false: Phase 1/2
-// behavior bit-identical.
+// with decoration middleware disabled. Default false: behavior bit-identical.
 var HONK_BENCH_MODE: bool = false;
 
-// --- zero-alloc route matchers (views into path, no copies) ---
-
-// Match `prefix` + single non-empty segment with no '/'. E.g. ("/users/7", "/users/") -> "7".
-inline fn match_1param(path: const u8[:], prefix: const u8[:]) -> const u8[:], bool {
-    if path.len <= prefix.len { return "", false; }
-    if path[..prefix.len] != prefix { return "", false; }
-    let rest = path[prefix.len..];
-    for c in rest {
-        if c == '/' { return "", false; }
-    }
-    return rest, true;
-}
+// --- demo route matchers (match_1param lives in honk_ctx; views, no copies) ---
 
 // Match "/orgs/:org/repos/:repo" with non-empty segments containing no '/'.
 inline fn match_org_repo(path: const u8[:]) -> const u8[:], const u8[:], bool {
@@ -112,13 +98,13 @@ inline fn mw_auth(c: Ctx&) -> bool {
 }
 
 // After-middleware: runs after the handler staged its response, before the
-// central emit. Stages the serving worker id (formatted into tmp, a buffer
+// central emit. Stages the serving worker id (formatted into c.tmp, which
 // the handler no longer extends, so ranges never overlap staged bodies).
-inline fn mw_after(c: Ctx&, tmp: u8[>..]&) {
+inline fn mw_after(c: Ctx&) {
     if hot_exempt(c.path) { return; }
-    let start = tmp.len;
-    format(tmp, honk_worker_id());
-    c.set_header("X-Worker", tmp[start..]);
+    let start = c.tmp.len;
+    format(c.tmp, honk_worker_id());
+    c.set_header("X-Worker", c.tmp[start..]);
 }
 
 // Bench-mode W3 middleware: stages exactly one hook header on the dynamic
@@ -131,95 +117,95 @@ inline fn mw_bench(c: Ctx&) {
     }
 }
 
-// --- handlers (stage into ctx; dispatch emits centrally) ---
+// --- handlers (ctx-only; stage into ctx; the turn runner emits centrally) ---
 
 inline fn h_plaintext(c: Ctx&) {
     c.text(200, "Hello, World!");
 }
 
-inline fn h_json(c: Ctx&, body_buf: u8[>..]&) {
+inline fn h_json(c: Ctx&) {
     if HONK_BENCH_MODE {
-        emit_bench_msg(body_buf);   // W2: exactly {"message":"Hello, World!"}
+        emit_bench_msg(c.res);   // W2: exactly {"message":"Hello, World!"}
     } else {
-        emit_hello_json(body_buf);
+        emit_hello_json(c.res);
     }
-    c.json_body(200, body_buf);
+    c.json_raw(200, c.res[..]);
 }
 
-inline fn h_bench_user(c: Ctx&, body_buf: u8[>..]&) {
+inline fn h_bench_user(c: Ctx&) {
     // W3: {"id":"<id>","role":"<role>"}; X-Frame-Bench staged by mw_bench.
-    let id = c.param(0);
+    let id = c.param_str(0);
     let role, rok = c.query("role");
     if rok {
-        emit_bench_user(body_buf, id, role);
+        emit_bench_user(c.res, id, role);
     } else {
-        emit_bench_user(body_buf, id, "");
+        emit_bench_user(c.res, id, "");
     }
-    c.json_body(200, body_buf);
+    c.json_raw(200, c.res[..]);
 }
 
-inline fn h_bench_create(c: Ctx&, body_buf: u8[>..]&, scratch: u8[>..]&) {
+inline fn h_bench_create(c: Ctx&) {
     // W4: validate {name non-empty str, age int, active bool} -> 201/400.
     var t = BenchUser { name: "", .. };
     var r = json::reader(c.body);
-    let ok = parse_bench_user(r, scratch, t);
+    let ok = parse_bench_user(r, c.tmp, t);
     if !ok || t.name.len == 0 {
         c.text(400, "Bad Request");
         return;
     }
-    emit_bench_created(body_buf, t);
-    c.json_body(201, body_buf);
+    emit_bench_created(c.res, t);
+    c.json_raw(201, c.res[..]);
 }
 
-inline fn h_user(c: Ctx&, body_buf: u8[>..]&) {
-    let id = c.param(0);
+inline fn h_user(c: Ctx&) {
+    let id = c.param_str(0);
     let v, vok = c.query("verbose");
     let verbose = vok && v == "1";
-    body_buf.push('{');
-    json::format_key(body_buf, "id");
-    json::format_string(body_buf, id);
-    body_buf.push(',');
-    json::format_key(body_buf, "verbose");
-    json::format_bool(body_buf, verbose);
-    body_buf.push('}');
-    c.json_body(200, body_buf);
+    c.res.push('{');
+    json::format_key(c.res, "id");
+    json::format_string(c.res, id);
+    c.res.push(',');
+    json::format_key(c.res, "verbose");
+    json::format_bool(c.res, verbose);
+    c.res.push('}');
+    c.json_raw(200, c.res[..]);
 }
 
-inline fn h_user_update(c: Ctx&, body_buf: u8[>..]&) {
-    let id = c.param(0);
-    body_buf.push('{');
-    json::format_key(body_buf, "id");
-    json::format_string(body_buf, id);
-    body_buf.push(',');
-    json::format_key(body_buf, "updated");
-    json::format_bool(body_buf, true);
-    body_buf.push('}');
-    c.json_body(200, body_buf);
+inline fn h_user_update(c: Ctx&) {
+    let id = c.param_str(0);
+    c.res.push('{');
+    json::format_key(c.res, "id");
+    json::format_string(c.res, id);
+    c.res.push(',');
+    json::format_key(c.res, "updated");
+    json::format_bool(c.res, true);
+    c.res.push('}');
+    c.json_raw(200, c.res[..]);
 }
 
-inline fn h_org_repo(c: Ctx&, body_buf: u8[>..]&) {
-    let org = c.param(0);
-    let repo = c.param(1);
-    body_buf.push('{');
-    json::format_key(body_buf, "org");
-    json::format_string(body_buf, org);
-    body_buf.push(',');
-    json::format_key(body_buf, "repo");
-    json::format_string(body_buf, repo);
-    body_buf.push('}');
-    c.json_body(200, body_buf);
+inline fn h_org_repo(c: Ctx&) {
+    let org = c.param_str(0);
+    let repo = c.param_str(1);
+    c.res.push('{');
+    json::format_key(c.res, "org");
+    json::format_string(c.res, org);
+    c.res.push(',');
+    json::format_key(c.res, "repo");
+    json::format_string(c.res, repo);
+    c.res.push('}');
+    c.json_raw(200, c.res[..]);
 }
 
-inline fn h_greet(c: Ctx&, body_buf: u8[>..]&) {
+inline fn h_greet(c: Ctx&) {
     let name, ok = c.query("name");
-    body_buf.append("Hello, ");
+    c.res.append("Hello, ");
     if ok && name.len > 0 {
-        body_buf.append(name);
+        c.res.append(name);
     } else {
-        body_buf.append("World");
+        c.res.append("World");
     }
-    body_buf.push('!');
-    c.text(200, body_buf);
+    c.res.push('!');
+    c.text(200, c.res[..]);
 }
 
 inline fn h_ua(c: Ctx&) {
@@ -231,63 +217,64 @@ inline fn h_ua(c: Ctx&) {
     }
 }
 
-inline fn h_admin(c: Ctx&, body_buf: u8[>..]&) {
+inline fn h_admin(c: Ctx&) {
     // Reached only via mw_auth (authed == true). X-Handler-Ran proves the
     // handler ran (absent on 401 short-circuit).
     c.set_header("X-Handler-Ran", "1");
-    body_buf.append("top-secret for ");
-    body_buf.append(c.user);
-    c.text(200, body_buf);
+    c.res.append("top-secret for ");
+    c.res.append(c.user);
+    c.text(200, c.res[..]);
 }
-inline fn h_typed(c: Ctx&, body_buf: u8[>..]&, scratch: u8[>..]&) {
+
+inline fn h_typed(c: Ctx&) {
     var t = TypedPost { name: "", .. };
     var r = json::reader(c.body);
-    let ok = parse_typed_fields(r, scratch, t);
+    let ok = parse_typed_fields(r, c.tmp, t);
     if !ok {
         c.text(400, "Bad Request");
         return;
     }
-    emit_typed_post(body_buf, t);
-    c.json_body(200, body_buf);
+    emit_typed_post(c.res, t);
+    c.json_raw(200, c.res[..]);
 }
 
-inline fn h_dom(c: Ctx&, body_buf: u8[>..]&, doc: json::Node[>..]&, decoded: u8[>..]&) {
-    let d = dom_summary(c.body, doc, decoded);
+inline fn h_dom(c: Ctx&) {
+    let d = dom_summary(c.body, c.dom, c.dstr);
     if !d.ok {
         c.text(400, "Bad Request");
         return;
     }
-    emit_dom_res(body_buf, d);
-    c.json_body(200, body_buf);
+    emit_dom_res(c.res, d);
+    c.json_raw(200, c.res[..]);
 }
 
 inline fn h_echo(c: Ctx&) {
     c.bytes(200, c.body);
 }
 
-inline fn h_stats(c: Ctx&, body_buf: u8[>..]&) {
-    body_buf.append("worker=");
-    format(body_buf, honk_worker_id());
-    body_buf.append(" active=");
-    format(body_buf, honk_active_conns());
-    body_buf.append(" accepted=");
-    format(body_buf, honk_accepted_total());
-    body_buf.append(" rejected=");
-    format(body_buf, honk_rejected_conns());
-    body_buf.append(" timed_out=");
-    format(body_buf, honk_timed_out_conns());
-    body_buf.append(" tx_queued=");
-    format(body_buf, honk_tx_queued_count());
-    c.text(200, body_buf);
+inline fn h_stats(c: Ctx&) {
+    c.res.append("worker=");
+    format(c.res, honk_worker_id());
+    c.res.append(" active=");
+    format(c.res, honk_active_conns());
+    c.res.append(" accepted=");
+    format(c.res, honk_accepted_total());
+    c.res.append(" rejected=");
+    format(c.res, honk_rejected_conns());
+    c.res.append(" timed_out=");
+    format(c.res, honk_timed_out_conns());
+    c.res.append(" tx_queued=");
+    format(c.res, honk_tx_queued_count());
+    c.text(200, c.res[..]);
 }
 
-inline fn h_large(c: Ctx&, body_buf: u8[>..]&, fd: i32) {
+inline fn h_large(c: Ctx&) {
     // Shrink SO_SNDBUF so pipelined 16 KiB responses exercise EAGAIN + EPOLLOUT.
-    honk_shrink_sndbuf(fd);
+    honk_shrink_sndbuf(c.fd);
     for _ in 1024 {
-        body_buf.append("0123456789ABCDEF");
+        c.res.append("0123456789ABCDEF");
     }
-    c.text(200, body_buf);
+    c.text(200, c.res[..]);
 }
 
 inline fn h_shutdown(c: Ctx&) {
@@ -296,21 +283,22 @@ inline fn h_shutdown(c: Ctx&) {
     c.text(200, "shutting down");
 }
 
-// --- dispatch: middleware chain + method/path graph + central emit ---
-// Returns true when the connection must close after this response.
+// --- dispatch: middleware chain + method/path graph (staging only) ---
+// The turn runner emits centrally afterwards; the runner closes the
+// connection when the staged ctx has keep_alive == false.
 
 // GET/HEAD route graph. HEAD shares GET routes; emit() drops the body.
-inline fn dispatch_get(c: Ctx&, body_buf: u8[>..]&, fd: i32) {
+inline fn dispatch_get(c: Ctx&) {
     if c.path == "/" || c.path == "/plaintext" {
         h_plaintext(c);
         return;
     }
     if c.path == "/json" {
-        h_json(c, body_buf);
+        h_json(c);
         return;
     }
     if c.path == "/greet" {
-        h_greet(c, body_buf);
+        h_greet(c);
         return;
     }
     if c.path == "/ua" {
@@ -318,15 +306,15 @@ inline fn dispatch_get(c: Ctx&, body_buf: u8[>..]&, fd: i32) {
         return;
     }
     if c.path == "/stats" {
-        h_stats(c, body_buf);
+        h_stats(c);
         return;
     }
     if c.path == "/large" {
-        h_large(c, body_buf, fd);
+        h_large(c);
         return;
     }
     if c.path == "/admin/secret" {
-        h_admin(c, body_buf);
+        h_admin(c);
         return;
     }
     let p0, ok1 = match_1param(c.path, "/users/");
@@ -334,9 +322,9 @@ inline fn dispatch_get(c: Ctx&, body_buf: u8[>..]&, fd: i32) {
         c.params[0] = p0;
         c.n_params = 1;
         if HONK_BENCH_MODE {
-            h_bench_user(c, body_buf);   // W3: {"id","role"}
+            h_bench_user(c);   // W3: {"id","role"}
         } else {
-            h_user(c, body_buf);
+            h_user(c);
         }
         return;
     }
@@ -345,16 +333,13 @@ inline fn dispatch_get(c: Ctx&, body_buf: u8[>..]&, fd: i32) {
         c.params[0] = o;
         c.params[1] = r;
         c.n_params = 2;
-        h_org_repo(c, body_buf);
+        h_org_repo(c);
         return;
     }
     if known_path(c.path) { c.text(405, "Method Not Allowed"); } else { c.text(404, "Not Found"); }
 }
 
-inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
-                   body_buf: u8[>..]&, scratch: u8[>..]&,
-                   doc: json::Node[>..]&, decoded: u8[>..]&,
-                   fd: i32) -> bool {
+inline fn dispatch(c: Ctx&) {
     // Before-middleware chain (execution order: first, second, auth).
     // Bench mode swaps decoration middleware for the single W3 hook header.
     if HONK_BENCH_MODE {
@@ -366,23 +351,22 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
     if !mw_auth(c) {
         c.text(c.status, status_text(c.status));
         if !HONK_BENCH_MODE {
-            mw_after(c, body_buf);
+            mw_after(c);
         }
-        c.emit(out, date);
-        return false;
+        return;
     }
 
     if c.method == "GET" || c.head_only {
-        dispatch_get(c, body_buf, fd);
+        dispatch_get(c);
     } else if c.method == "POST" {
         if c.path == "/users" && HONK_BENCH_MODE {
-            h_bench_create(c, body_buf, scratch);   // W4: validate -> 201/400
+            h_bench_create(c);   // W4: validate -> 201/400
         } else if c.path == "/echo" {
             h_echo(c);
         } else if c.path == "/api/typed" {
-            h_typed(c, body_buf, scratch);
+            h_typed(c);
         } else if c.path == "/api/dom" {
-            h_dom(c, body_buf, doc, decoded);
+            h_dom(c);
         } else if c.path == "/__shutdown" {
             h_shutdown(c);
         } else if known_path(c.path) {
@@ -395,7 +379,7 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
         if ok1 {
             c.params[0] = p0;
             c.n_params = 1;
-            h_user_update(c, body_buf);
+            h_user_update(c);
         } else if known_path(c.path) {
             c.text(405, "Method Not Allowed");
         } else {
@@ -415,80 +399,9 @@ inline fn dispatch(c: Ctx&, out: u8[>..]&, date: const u8[:],
         }
     }
 
-    // After-middleware, then the single central emit.
+    // After-middleware (the turn runner emits next).
     // (Bench mode stages nothing here: W3's hook header comes from mw_bench.)
     if !HONK_BENCH_MODE {
-        mw_after(c, body_buf);
+        mw_after(c);
     }
-    c.emit(out, date);
-    return !c.keep_alive;
-}
-
-// Phase 2 turn: identical transport to Phase 1, but each pipelined request
-// runs in an explicit inner scope with its own body_buf/scratch/doc/decoded
-// so per-request data-stack tops reset every iteration. Returns the rx_buf
-// stack top (== entry baseline) for discipline assertions.
-inline fn process_ready_fd2(fd: i32, date_hdr: const u8[:]) -> i64 {
-    var rx_buf: u8[>..] = [];
-    let base_top = honk_debug_stack_base(rx_buf);
-    let total = honk_conn_read(fd, rx_buf);
-    if total <= 0 {
-        assert(honk_debug_stack_top(rx_buf) == base_top);
-        return honk_debug_stack_top(rx_buf);
-    }
-
-    var tx_buf: u8[>..] = [];
-    var cursor: i32 = 0;
-    var close_conn = false;
-
-    while cursor < rx_buf.len {
-        var req = RawReq { .. };
-        let rem_slice: const u8[:] = rx_buf[cursor..];
-        let pret = honk_parse_req(rem_slice, req);
-        if pret == -2 {
-            break;
-        }
-        if pret < 0 {
-            write_error_response(tx_buf, pret, date_hdr);
-            close_conn = true;
-            break;
-        }
-        {
-            // Per-request scope: all four builders reset at block exit.
-            var body_buf: u8[>..] = [];
-            var scratch: u8[>..] = [];
-            var doc: json::Node[>..] = [];
-            var decoded: u8[>..] = [];
-            let method = rem_slice[req.method_off .. req.method_end];
-            let full_path = rem_slice[req.path_off .. req.path_end];
-            let body = rem_slice[req.body_off .. req.body_end];
-            // Raw header block: bytes between the request line and body_off.
-            let hb = req.body_off as! i64;
-            var line_end = -1;
-            var k: i64 = 0;
-            while k + 1 < hb {
-                if rem_slice[k] == '\r' && rem_slice[k + 1] == '\n' {
-                    line_end = k;
-                    break;
-                }
-                k++;
-            }
-            let hdrs = if line_end >= 0 { rem_slice[line_end + 2 .. hb] } else { rem_slice[hb..hb] };
-            let ka = req.keep_alive != 0;
-            var ctx = make_ctx(method, full_path, body, hdrs, ka);
-            let must_close = dispatch(ctx, tx_buf, date_hdr, body_buf, scratch, doc, decoded, fd);
-            cursor += req.consumed;
-            if must_close {
-                close_conn = true;
-                break;
-            }
-        }
-    }
-
-    if tx_buf.len > 0 {
-        honk_send(fd, tx_buf);
-    }
-    honk_conn_finish(fd, rx_buf, cursor, if close_conn { 1 } else { 0 });
-    assert(honk_debug_stack_top(rx_buf) == base_top);
-    return honk_debug_stack_top(rx_buf);
 }
