@@ -5,7 +5,7 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.5.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v0.6.0";   // or relative "../Honk"
 import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
 import honk_sqlite from "../Honk/sqlite";   // opt-in: SQLite (-lsqlite3)
 import honk.src.honk_test.honk_test;        // opt-in: in-memory unit tester
@@ -66,6 +66,12 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | `app.require_int(key) { val => … };` | Integer field or `400 {"error":"invalid or missing field: <key>"}` |
 | `app.require_int_range(key, min, max) { val => … };` | Bounded integer or `400 {"error":"out of range: <key>"}` |
 | `app.require_bool(key) { val => … };` | Boolean field or `400 {"error":"invalid or missing field: <key>"}` |
+| `app.form(key)` / `form_or(key, def)` / `form_int(key)` | Decoded `x-www-form-urlencoded` (or `multipart/form-data` text) field |
+| `app.require_form(key) { val => … };` | Non-empty form field or `400 {"error":"invalid or missing field: <key>"}` |
+| `app.multipart_file(key) -> Part, bool` / `multipart_part(key)` | Zero-copy RFC 7578 `Part { name, filename, ctype, data, has_file }` (`filename` stripped to basename) |
+| `app.each_part() { part => … } -> bool` | Iterate all parts in a `multipart/form-data` request; `false` if malformed |
+| `app.stream(ctype = "text/plain") { s => s.write(chunk); };` | HTTP/1.1 `Transfer-Encoding: chunked` streaming response (`s.closed` tracks peer disconnect) |
+| `app.sse() { ev => … };` | `text/event-stream` (`ev.send`, `ev.event`, `ev.id_event`, `ev.comment`, `ev.retry`) |
 
 ## In-memory unit tester (`import honk.src.honk_test.honk_test;`)
 
@@ -73,7 +79,7 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 |---|---|
 | `honk::tester() -> Tester` | Value-owned test harness (zero sockets, reusable across thousands of requests) |
 | `t.get(target) { app => … };` / `t.get_headers(target, hdrs) { app => … };` / `t.delete(target) { app => … };` | Synthetic `GET` / `DELETE` |
-| `t.post_json` / `put_json` / `patch_json(target, json_body) { app => … };` | Synthetic JSON `POST` / `PUT` / `PATCH` |
+| `t.post_json` / `put_json` / `patch_json(target, json_body) { app => … };` / `t.post_form(target, form_body) { app => … };` | Synthetic JSON / URL-encoded form requests |
 | `t.req(method, target, hdrs, body) { app => … };` | Arbitrary synthetic HTTP/1.1 request |
 | `t.status`, `t.body() -> slice`, `t.ctype() -> slice`, `t.header(name) -> val, bool` | Inspect emitted status, `Content-Type`, body, and response headers |
 
