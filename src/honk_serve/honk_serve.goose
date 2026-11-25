@@ -53,18 +53,19 @@ fn listen_cfg_or_abort(cfg: Config&) {
 }
 
 // Event loop: feeds every ready fd to F(fd, date) until shutdown is
-// requested (via honk_request_stop, e.g. a /__shutdown route), then shuts
-// the worker down cleanly so the process can exit 0 for LSan.
+// requested (SIGINT, SIGTERM, or honk_request_stop), then drains queued
+// outbound bytes and shuts the worker down cleanly for LSan.
 inline fn serve<F>() {
     var ready_fds: i32[256] = [0; 256];
     var date_hdr: u8[29] = [0; 29];
     loop {
         let nfds = honk_wait(ready_fds, date_hdr, 100);
-        if nfds <= 0 { continue; }
-        assert(nfds <= 256);
-        for i in nfds {
-            let fd = ready_fds[i];
-            F(fd, date_hdr);
+        if nfds > 0 {
+            assert(nfds <= 256);
+            for i in nfds {
+                let fd = ready_fds[i];
+                F(fd, date_hdr);
+            }
         }
         if honk_should_stop() != 0 {
             honk_worker_shutdown();

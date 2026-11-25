@@ -23,12 +23,12 @@ thread_fn worker_minimal(cfg: WorkerCfg) {
 
     loop {
         let nfds = honk_wait(ready_fds, date_hdr, 100);
-        if nfds <= 0 { continue; }
-        assert(nfds <= 256);
-
-        for i in nfds {
-            let fd = ready_fds[i];
-            process_ready_fd(fd, date_hdr);
+        if nfds > 0 {
+            assert(nfds <= 256);
+            for i in nfds {
+                let fd = ready_fds[i];
+                process_ready_fd(fd, date_hdr);
+            }
         }
         if honk_should_stop() != 0 {
             honk_worker_shutdown();

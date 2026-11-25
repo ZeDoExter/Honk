@@ -17,6 +17,7 @@ namespace honk;
 
 import std;
 import json;
+import honk_net.honk_net;
 import honk_ctx.honk_ctx;
 import honk_serve.honk_serve;
 
@@ -38,13 +39,39 @@ inline fn request_app<F>(fd: i32, date: const u8[:]) {
     };
 }
 
-// Single-worker server on the calling thread (plain `main`, no threads).
-// Returns after a clean shutdown (honk_request_stop), so LSan runs at exit.
+// Pre-fork `n` SO_REUSEPORT worker processes (0 = auto CPU count, 1..64).
+// Call before per-worker setup like `db_open()`; listen() joins children.
+fn workers(n: i32) -> i32 {
+    return honk_fork_workers(n);
+}
+
+// Pre-fork worker processes from $HONK_WORKERS (defaults to 1 when unset).
+fn workers_env() -> i32 {
+    return honk_fork_env();
+}
+
+// Server on `main`: 1 worker by default, or N SO_REUSEPORT workers via
+// $HONK_WORKERS (or a prior honk::workers() call). Drains cleanly on
+// SIGINT, SIGTERM, or honk_request_stop() so LSan and destructors run.
 fn listen<F>(port: i32) {
-    listen_or_abort(port);
+    honk_fork_env();
+    honk_set_timeouts(30000, 10000);
+    guard honk_worker_init(port) == 0 else { abort("honk_worker_init failed"); }
     serve() { fd, date =>
         request_app(fd, date) { app => F(app); };
     };
+    honk_fork_join();
+}
+
+// Explicit multi-worker variant of listen() (n = 0 for auto CPU count, 1..64).
+fn listen_workers<F>(port: i32, n: i32) {
+    honk_fork_workers(n);
+    honk_set_timeouts(30000, 10000);
+    guard honk_worker_init(port) == 0 else { abort("honk_worker_init failed"); }
+    serve() { fd, date =>
+        request_app(fd, date) { app => F(app); };
+    };
+    honk_fork_join();
 }
 
 // listen() with full Config (timeouts, worker id, CPU pin).
@@ -53,6 +80,7 @@ fn listen_cfg<F>(cfg: Config&) {
     serve() { fd, date =>
         request_app(fd, date) { app => F(app); };
     };
+    honk_fork_join();
 }
 
 // --- static literal routes (default 200 OK) ---

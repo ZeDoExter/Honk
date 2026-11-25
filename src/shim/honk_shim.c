@@ -29,6 +29,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,12 +40,15 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #define HONK_MAX_EVENTS       256
 #define HONK_MAX_CONNS        4096
 #define HONK_MAX_FD           16384
 #define HONK_RECV_CHUNK       65536
+#define HONK_MAX_WORKERS      64
+#define HONK_DRAIN_MS         2000
 
 #define HONK_MAX_HEADER_SIZE  8192
 #define HONK_MAX_BODY_SIZE    1048576
@@ -111,6 +115,47 @@ static __thread int32_t tls_idle_timeout_ms = 30000;
 static __thread int32_t tls_header_timeout_ms = 10000;
 static __thread int64_t tls_now_ms = 0;
 static __thread int64_t tls_last_sweep_ms = 0;
+static __thread int32_t tls_worker_id = 0;
+static __thread int32_t tls_should_stop = 0;
+
+/* Process-wide async-signal-safe stop flags & pre-epoll fork supervision. */
+static volatile sig_atomic_t g_sigint_count = 0;
+static volatile sig_atomic_t g_sigterm_flag = 0;
+static atomic_int g_sig_installed = 0;
+static atomic_int g_open_dbs = 0;
+
+static int32_t g_fork_initialized = 0;
+static int32_t g_is_fork_parent = 0;
+static int32_t g_num_children = 0;
+static pid_t g_parent_pid = 0;
+static pid_t g_child_pids[HONK_MAX_WORKERS];
+
+static void honk_sig_handler(int sig) {
+    if (sig == SIGINT) {
+        if (g_sigint_count < 2) g_sigint_count++;
+    } else {
+        g_sigterm_flag = 1;
+    }
+}
+
+static void install_signal_handlers(void) {
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&g_sig_installed, &expected, 1)) {
+        return;
+    }
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = honk_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; /* no SA_RESTART: wake epoll_wait with EINTR immediately */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+void honk_note_db_open(int32_t delta) {
+    atomic_fetch_add(&g_open_dbs, (int)delta);
+}
 
 static int64_t monotonic_ms(void) {
     struct timespec ts;
@@ -291,7 +336,8 @@ void honk_set_timeouts(int32_t idle_timeout_ms, int32_t header_timeout_ms) {
 }
 
 int32_t honk_worker_init(int32_t port) {
-    signal(SIGPIPE, SIG_IGN);
+    install_signal_handlers();
+    tls_should_stop = 0;
     if (!tls_conns) {
         /* calloc zeroes all slots lazily without faulting untouched pages */
         tls_conns = (honk_conn_t *)calloc(HONK_MAX_FD, sizeof(honk_conn_t));
@@ -344,7 +390,61 @@ int32_t honk_worker_init(int32_t port) {
 }
 
 void honk_worker_shutdown(void) {
+    if (g_is_fork_parent && g_num_children > 0) {
+        for (int32_t i = 0; i < g_num_children; i++) {
+            if (g_child_pids[i] > 0) {
+                kill(g_child_pids[i], SIGTERM);
+            }
+        }
+    }
+    if (tls_listen_fd >= 0) {
+        if (tls_epfd >= 0) {
+            epoll_ctl(tls_epfd, EPOLL_CTL_DEL, tls_listen_fd, NULL);
+        }
+        close(tls_listen_fd);
+        tls_listen_fd = -1;
+    }
     if (tls_conns) {
+        int draining = 0;
+        update_tls_clock_and_date();
+        for (int fd = 0; fd <= tls_max_fd_seen; fd++) {
+            honk_conn_t *c = &tls_conns[fd];
+            if (!c->active) continue;
+            int has_tx = (c->pending_tx && c->pending_tx_off < c->pending_tx_len) ||
+                         c->sendfile_remain > 0;
+            if (has_tx && g_sigint_count < 2 && tls_epfd >= 0) {
+                c->close_after_tx = 1;
+                mod_conn_epoll(c, EPOLLOUT | EPOLLRDHUP);
+                flush_pending_tx(fd);
+                if (c->active) draining++;
+            } else {
+                close_conn_fd(fd);
+            }
+        }
+        if (draining > 0 && tls_epfd >= 0 && g_sigint_count < 2) {
+            int64_t deadline_ms = monotonic_ms() + HONK_DRAIN_MS;
+            while (tls_active_conns > 0 && g_sigint_count < 2) {
+                int64_t rem = deadline_ms - monotonic_ms();
+                if (rem <= 0) break;
+                int wait_ms = (int)(rem > 50 ? 50 : rem);
+                int n = epoll_wait(tls_epfd, tls_events, HONK_MAX_EVENTS, wait_ms);
+                update_tls_clock_and_date();
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                for (int i = 0; i < n; i++) {
+                    int fd = tls_events[i].data.fd;
+                    uint32_t ev = tls_events[i].events;
+                    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns[fd].active) continue;
+                    if ((ev & EPOLLERR) || ((ev & (EPOLLHUP | EPOLLRDHUP)) && !(ev & EPOLLOUT))) {
+                        close_conn_fd(fd);
+                    } else {
+                        flush_pending_tx(fd);
+                    }
+                }
+            }
+        }
         for (int fd = 0; fd <= tls_max_fd_seen; fd++) {
             if (tls_conns[fd].active) {
                 close_conn_fd(fd);
@@ -352,10 +452,6 @@ void honk_worker_shutdown(void) {
         }
         free(tls_conns);
         tls_conns = NULL;
-    }
-    if (tls_listen_fd >= 0) {
-        close(tls_listen_fd);
-        tls_listen_fd = -1;
     }
     if (tls_epfd >= 0) {
         close(tls_epfd);
@@ -873,15 +969,137 @@ void honk_close(int32_t fd) {
     close_conn_fd(fd);
 }
 
-static __thread int32_t tls_worker_id = 0;
-static __thread int32_t tls_should_stop = 0;
-
 void honk_request_stop(void) {
     tls_should_stop = 1;
+    if (g_is_fork_parent && g_num_children > 0) {
+        for (int32_t i = 0; i < g_num_children; i++) {
+            if (g_child_pids[i] > 0) kill(g_child_pids[i], SIGTERM);
+        }
+    } else if (g_parent_pid > 0) {
+        kill(g_parent_pid, SIGTERM);
+    }
 }
 
 int32_t honk_should_stop(void) {
-    return tls_should_stop;
+    return (tls_should_stop || g_sigint_count > 0 || g_sigterm_flag != 0) ? 1 : 0;
+}
+
+static int32_t detect_cpu_count(void) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (sched_getaffinity(0, sizeof(mask), &mask) == 0) {
+        int n = CPU_COUNT(&mask);
+        if (n > HONK_MAX_WORKERS) n = HONK_MAX_WORKERS;
+        if (n >= 1) return (int32_t)n;
+    }
+    long sc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (sc > HONK_MAX_WORKERS) sc = HONK_MAX_WORKERS;
+    return sc >= 1 ? (int32_t)sc : 1;
+}
+
+int32_t honk_fork_workers(int32_t n) {
+    install_signal_handlers();
+    if (g_fork_initialized) {
+        return g_is_fork_parent ? (g_num_children + 1) : 1;
+    }
+    if (n == 0) {
+        n = detect_cpu_count();
+    }
+    if (n < 1 || n > HONK_MAX_WORKERS) {
+        fprintf(stderr, "honk: worker count %d out of range (expected 0=auto or 1..%d)\n",
+                (int)n, HONK_MAX_WORKERS);
+        fflush(stderr);
+        _exit(1);
+    }
+    if (n > 1 && atomic_load(&g_open_dbs) > 0) {
+        fprintf(stderr, "honk: cannot fork %d workers with an open SQLite handle; "
+                        "call honk::workers() / honk::workers_env() before db_open()\n",
+                (int)n);
+        fflush(stderr);
+        _exit(1);
+    }
+    g_fork_initialized = 1;
+    tls_worker_id = 0;
+    if (n == 1) {
+        return 1;
+    }
+    fflush(NULL);
+    pid_t parent_pid = getpid();
+    g_is_fork_parent = 1;
+    g_num_children = 0;
+    for (int32_t i = 1; i < n; i++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            for (int32_t k = 0; k < g_num_children; k++) {
+                if (g_child_pids[k] > 0) kill(g_child_pids[k], SIGTERM);
+            }
+            fprintf(stderr, "honk: fork() failed\n");
+            fflush(stderr);
+            _exit(1);
+        }
+        if (pid == 0) {
+            g_is_fork_parent = 0;
+            g_num_children = 0;
+            g_parent_pid = parent_pid;
+            tls_worker_id = i;
+            return n;
+        }
+        g_child_pids[g_num_children++] = pid;
+    }
+    return n;
+}
+
+int32_t honk_fork_env(void) {
+    if (g_fork_initialized) {
+        return g_is_fork_parent ? (g_num_children + 1) : 1;
+    }
+    const char *env = getenv("HONK_WORKERS");
+    if (!env || env[0] == '\0') {
+        return honk_fork_workers(1);
+    }
+    if (strcmp(env, "auto") == 0 || strcmp(env, "0") == 0) {
+        return honk_fork_workers(0);
+    }
+    char *end = NULL;
+    long v = strtol(env, &end, 10);
+    if (!end || *end != '\0' || v < 1 || v > HONK_MAX_WORKERS) {
+        fprintf(stderr, "honk: invalid HONK_WORKERS='%s' (expected 1..%d or 'auto')\n",
+                env, HONK_MAX_WORKERS);
+        fflush(stderr);
+        _exit(1);
+    }
+    return honk_fork_workers((int32_t)v);
+}
+
+void honk_fork_join(void) {
+    if (!g_is_fork_parent || g_num_children <= 0) {
+        return;
+    }
+    int fail_code = 0;
+    for (int32_t i = 0; i < g_num_children; i++) {
+        pid_t pid = g_child_pids[i];
+        if (pid <= 0) continue;
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        g_child_pids[i] = 0;
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            fail_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            int sig = WTERMSIG(status);
+            if (sig != SIGTERM && sig != SIGINT) {
+                fail_code = 128 + sig;
+            }
+        }
+    }
+    g_num_children = 0;
+    g_is_fork_parent = 0;
+    if (fail_code != 0) {
+        fprintf(stderr, "honk: worker child exited with failure (%d)\n", fail_code);
+        _exit(fail_code);
+    }
 }
 
 int32_t honk_pin_thread_cpu(int32_t worker_id, int32_t cpu_id) {

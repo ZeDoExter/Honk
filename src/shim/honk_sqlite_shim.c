@@ -40,6 +40,8 @@ static char *dup_nul(const uint8_t *data, int64_t len) {
     return s;
 }
 
+extern void honk_note_db_open(int32_t delta);
+
 uint64_t hsql_open(sl_u8_sqlite path, int32_t flags) {
     char *p = dup_nul(path.data, path.len);
     if (!p) return 0;
@@ -50,12 +52,17 @@ uint64_t hsql_open(sl_u8_sqlite path, int32_t flags) {
         if (db) sqlite3_close(db);
         return 0;
     }
+    honk_note_db_open(1);
     return (uint64_t)(uintptr_t)db;
 }
 
 int32_t hsql_close(uint64_t db_h) {
     if (!db_h) return 0;
-    return (int32_t)sqlite3_close((sqlite3 *)(uintptr_t)db_h);
+    int rc = sqlite3_close((sqlite3 *)(uintptr_t)db_h);
+    if (rc == SQLITE_OK) {
+        honk_note_db_open(-1);
+    }
+    return (int32_t)rc;
 }
 
 int32_t hsql_shutdown(void) {
