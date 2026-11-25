@@ -1,37 +1,75 @@
-// honk_static.goose -- zero-copy static file serving over kernel sendfile().
-//
-// try_serve_file validates + opens root/rel, stages response headers, and
-// hands the open fd to the turn, which send()s headers first and then pushes
-// file bytes via honk_sendfile_data (EAGAIN tails resume on EPOLLOUT).
-// File bytes never pass through Goose buffers.
-//
-// Security: NUL/backslash/malformed-% rejected; decoded segments checked
-// (.. rejected, . and empties skipped); open uses O_NOFOLLOW + O_NONBLOCK +
-// fstat S_ISREG (symlinks/dirs/FIFOs/devices never served). Non-GET/HEAD
-// stages 405. static_dir() mounts a directory in App route DSL style.
+// honk_static.goose -- zero-copy static file serving (`sendfile` + `ETag`/`304`
+// + compile-time `embed_file` single-binary asset serving).
+
 import std;
 import src.honk_ctx.honk_ctx;
 
-// App-level directory mount: GET/HEAD under prefix served from root.
-// Marks path_matched for 405 tracking; first-match-wins via app.handled.
+// App-level directory mount: GET/HEAD under prefix served from root with ETag/304.
 inline fn static_dir(app: honk::Ctx&, prefix: const u8[:], root: const u8[:]) {
+    static_dir_cached(app, prefix, root, "");
+}
+
+// Directory mount with explicit `Cache-Control` header (e.g. `"public, max-age=3600"`).
+inline fn static_dir_cached(app: honk::Ctx&, prefix: const u8[:], root: const u8[:], cache_ctl: const u8[:]) {
     if app.handled { return; }
     if prefix == "/" {
         if app.path.len == 0 || app.path[0] != '/' { return; }
         app.path_matched = true;
         if app.method != "GET" && !app.head_only { return; }
-        if serve_rel(app, root, app.path[1..], true) { app.handled = true; }
+        if serve_rel_cached(app, root, app.path[1..], true, cache_ctl) { app.handled = true; }
         return;
     }
     let rest, ok = app.rest(prefix);
     if !ok { return; }
     app.path_matched = true;
     if app.method != "GET" && !app.head_only { return; }
-    if serve_rel(app, root, rest, true) { app.handled = true; }
+    if serve_rel_cached(app, root, rest, true, cache_ctl) { app.handled = true; }
+}
+
+// Serve compile-time `embed_file(...)` bytes at `route` with deterministic
+// FNV-1a `ETag` + `304 Not Modified` support (ships SPAs inside one binary).
+inline fn embed(app: honk::Ctx&, route: const u8[:], data: const u8[:],
+                mime: const u8[:] = "", cache_ctl: const u8[:] = "") {
+    if app.handled { return; }
+    if app.path == route { app.path_matched = true; }
+    if (app.method != "GET" && !app.head_only) || app.path != route { return; }
+
+    var h: u64 = 14695981039346656037;
+    for b in data {
+        h = (h ^ b) * 1099511628211;
+    }
+    let estart = app.tmp.len;
+    app.tmp.append("\"");
+    format(app.tmp, data.len);
+    app.tmp.push('-');
+    format(app.tmp, (h & 9223372036854775807) as! i64);
+    app.tmp.push('"');
+    let etag = app.tmp[estart..];
+
+    app.set_header("ETag", etag);
+    if cache_ctl.len > 0 {
+        app.set_header("Cache-Control", cache_ctl);
+    }
+    let ctype = if mime.len > 0 { mime } else { mime_for_rel(route) };
+    let inm, has_inm = app.header("If-None-Match");
+    if has_inm && (inm == etag || inm == "*") {
+        app.status = 304;
+        app.ctype = ctype;
+        app.resp_body = "";
+        app.resp_len = 0;
+        app.responded = true;
+    } else {
+        app.status = 200;
+        app.ctype = ctype;
+        app.resp_body = data;
+        app.responded = true;
+    }
+    app.handled = true;
 }
 
 extern fn honk_file_open(root: const u8[:], rel: const u8[:]) -> i32;
 extern fn honk_file_size(file_fd: i32) -> i64;
+extern fn honk_file_mtime(file_fd: i32) -> i64;
 extern fn honk_file_close(file_fd: i32);
 
 inline fn ext_eq(a: const u8[:], b: const u8[:]) -> bool {
@@ -72,12 +110,6 @@ fn mime_for_rel(rel: const u8[:]) -> const u8[:] {
     return "application/octet-stream";
 }
 
-// Serve c.path from root. Returns true when handled:
-//   - GET/HEAD miss, traversal, malformed, non-regular: false (unstaged;
-//     caller falls back to 404, SPA index.html, ...).
-//   - Other methods: stages 405, returns true.
-//   - Directory/empty remainder: tries index.html when with_index.
-// Root should be a static literal (borrowed, never copied).
 fn try_serve_file(c: honk::Ctx&, root: const u8[:], with_index: bool) -> bool {
     if c.method != "GET" && !c.head_only {
         c.text(405, "Method Not Allowed");
@@ -86,17 +118,19 @@ fn try_serve_file(c: honk::Ctx&, root: const u8[:], with_index: bool) -> bool {
     if root.len == 0 || c.path.len == 0 || c.path[0] != '/' {
         return false;
     }
-    return serve_rel(c, root, c.path[1..], with_index);
+    return serve_rel_cached(c, root, c.path[1..], with_index, "");
 }
 
-// Serve an explicit relative path (no leading slash). Same validation and
-// staging as try_serve_file; used for SPA index.html fallback and tests.
 fn serve_rel(c: honk::Ctx&, root: const u8[:], raw: const u8[:], with_index: bool) -> bool {
+    return serve_rel_cached(c, root, raw, with_index, "");
+}
+
+fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
+                    with_index: bool, cache_ctl: const u8[:]) -> bool {
     if root.len == 0 { return false; }
     for ch in raw {
         if ch == 0 || ch == '\\' { return false; }
     }
-    // Decode %XX (+ stays literal in paths) and normalize segments.
     let dec, ok = honk::url_decode(c, raw, false);
     if !ok { return false; }
     for ch in dec {
@@ -119,7 +153,7 @@ fn serve_rel(c: honk::Ctx&, root: const u8[:], raw: const u8[:], with_index: boo
         if end > pos {
             let seg = dec[pos..end];
             if seg.len == 2 && seg[0] == '.' && seg[1] == '.' {
-                return false;   // traversal attempt
+                return false;
             }
             if !(seg.len == 1 && seg[0] == '.') {
                 if segs > 0 { c.tmp.push('/'); }
@@ -144,9 +178,33 @@ fn serve_rel(c: honk::Ctx&, root: const u8[:], raw: const u8[:], with_index: boo
         honk_file_close(fd);
         return false;
     }
+    let mtime = honk_file_mtime(fd);
     let mime = mime_for_rel(rel);
+
+    let estart = c.tmp.len;
+    c.tmp.append("W/\"");
+    format(c.tmp, size);
+    c.tmp.push('-');
+    format(c.tmp, mtime);
+    c.tmp.push('"');
+    let etag = c.tmp[estart..];
+
+    let inm, has_inm = c.header("If-None-Match");
+    if has_inm && (inm == etag || inm == "*") {
+        c.set_header("ETag", etag);
+        if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
+        c.status = 304;
+        c.ctype = mime;
+        c.resp_body = "";
+        c.resp_len = 0;
+        c.responded = true;
+        honk_file_close(fd);
+        return true;
+    }
+
     if c.head_only || size == 0 {
-        // No file bytes: normal emit path with explicit Content-Length.
+        c.set_header("ETag", etag);
+        if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
         c.status = 200;
         c.ctype = mime;
         c.resp_body = "";
@@ -155,12 +213,18 @@ fn serve_rel(c: honk::Ctx&, root: const u8[:], raw: const u8[:], with_index: boo
         honk_file_close(fd);
         return true;
     }
-    // GET with bytes: headers join tx_buf in order; file follows via sendfile.
+
     let hstart = c.res.len;
     c.res.append("HTTP/1.1 200 OK\r\nContent-Type: ");
     c.res.append(mime);
     c.res.append("\r\nDate: ");
     c.res.append(c.date);
+    c.res.append("\r\nETag: ");
+    c.res.append(etag);
+    if cache_ctl.len > 0 {
+        c.res.append("\r\nCache-Control: ");
+        c.res.append(cache_ctl);
+    }
     if !c.keep_alive {
         c.res.append("\r\nConnection: close");
     }

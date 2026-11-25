@@ -88,15 +88,27 @@ fn header(t: Tester&, name: const u8[:]) -> const u8[:], bool {
 }
 
 // Execute one synthetic HTTP/1.1 request against `F(app)` in memory.
+// Copies inputs into a turn-local `rx_buf` (matching real `honk::request`) so
+// caller-constructed headers/bodies never borrow-couple with `ctx` (§9.2).
 inline fn req<F>(t: Tester&, method: const u8[:], target: const u8[:],
                  req_hdrs: const u8[:], req_body: const u8[:]) {
+    var rx_buf: u8[>..] = [];
+    let m_end = method.len;
+    rx_buf.append(method);
+    let t_end = m_end + target.len;
+    rx_buf.append(target);
+    let h_end = t_end + req_hdrs.len;
+    rx_buf.append(req_hdrs);
+    rx_buf.append(req_body);
+
     var res_buf: u8[>..] = [];
     var tmp_buf: u8[>..] = [];
     var dom_buf: json::Node[>..] = [];
     var dstr_buf: u8[>..] = [];
     var tx_buf: u8[>..] = [];
 
-    var ctx = make_ctx(method, target, req_body, req_hdrs, true, -1,
+    var ctx = make_ctx(rx_buf[..m_end], rx_buf[m_end..t_end], rx_buf[h_end..],
+                       rx_buf[t_end..h_end], true, -1,
                        "Thu, 01 Jan 1970 00:00:00 GMT",
                        res_buf, tmp_buf, dom_buf, dstr_buf);
     app_run(ctx) { c => F(c); };

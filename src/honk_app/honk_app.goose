@@ -141,6 +141,39 @@ inline fn after<F>(app: Ctx&) {
     F();
 }
 
+// Fixed-window rate limiter keyed by `key` (e.g. IP or token). Stages `429` +
+// `Retry-After` and marks `app.handled = true` when `max_reqs` per `window_sec` is exceeded.
+inline fn rate_limit_key(app: Ctx&, key: const u8[:], max_reqs: i32, window_sec: i32) {
+    if app.handled { return; }
+    var h: u64 = 14695981039346656037;
+    for b in key {
+        h = (h ^ b) * 1099511628211;
+    }
+    let rem = honk_rate_allow(h as! i64, max_reqs, window_sec * 1000);
+    if rem < 0 {
+        let rstart = app.tmp.len;
+        format(app.tmp, (0 - rem) as! i64);
+        app.set_header("Retry-After", app.tmp[rstart..]);
+        if app.json_err_mode {
+            app.json_error(429, "too many requests");
+        } else {
+            app.text(429, "Too Many Requests");
+        }
+        app.handled = true;
+    } else {
+        let qstart = app.tmp.len;
+        format(app.tmp, rem as! i64);
+        app.set_header("X-RateLimit-Remaining", app.tmp[qstart..]);
+    }
+}
+
+// Per-client-IP rate limiter (`X-Forwarded-For` / `X-Real-IP` / socket peer IP).
+inline fn rate_limit(app: Ctx&, max_reqs: i32, window_sec: i32) {
+    if app.handled { return; }
+    let ip = app.real_ip();
+    app.rate_limit_key(ip, max_reqs, window_sec);
+}
+
 // One-line CORS (`*` allow-all + automatic `204` `OPTIONS` preflight).
 inline fn cors(app: Ctx&) {
     if app.handled { return; }

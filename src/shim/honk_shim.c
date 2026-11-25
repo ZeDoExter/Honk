@@ -78,6 +78,7 @@ typedef struct {
     uint8_t active;
     uint8_t close_after_tx;
     uint16_t _pad;
+    uint32_t peer_ip;
     uint32_t epoll_events;
     uint8_t *partial_rx;
     size_t partial_rx_len;
@@ -96,12 +97,22 @@ typedef struct {
     int64_t sendfile_remain;
 } honk_conn_t;
 
+typedef struct {
+    uint64_t key;
+    int64_t reset_ms;
+    int32_t count;
+    int32_t _pad;
+} honk_rl_slot_t;
+
+#define HONK_RL_SLOTS 2048
+
 /* Per-worker thread-local state (Amendment B: zero mutable shared globals) */
 static __thread int tls_listen_fd = -1;
 static __thread int tls_epfd = -1;
 static __thread time_t tls_last_sec = 0;
 static __thread char tls_date_str[32] = "Thu, 01 Jan 1970 00:00:00 GMT";
 static __thread honk_conn_t *tls_conns = NULL;
+static __thread honk_rl_slot_t *tls_rl_table = NULL;
 static __thread struct epoll_event tls_events[HONK_MAX_EVENTS];
 
 static __thread int32_t tls_active_conns = 0;
@@ -167,6 +178,10 @@ int64_t honk_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+int64_t honk_unix_sec(void) {
+    return (int64_t)time(NULL);
 }
 
 static void update_tls_clock_and_date(void) {
@@ -463,6 +478,10 @@ void honk_worker_shutdown(void) {
         close(tls_epfd);
         tls_epfd = -1;
     }
+    if (tls_rl_table) {
+        free(tls_rl_table);
+        tls_rl_table = NULL;
+    }
 }
 
 int32_t honk_wait(int32_t *out_fds, uint8_t *out_date29, int32_t timeout_ms) {
@@ -504,6 +523,7 @@ int32_t honk_wait(int32_t *out_fds, uint8_t *out_date29, int32_t timeout_ms) {
                 c->fd = cfd;
                 c->active = 1;
                 c->close_after_tx = 0;
+                c->peer_ip = ntohl(caddr.sin_addr.s_addr);
                 c->epoll_events = EPOLLIN | EPOLLRDHUP;
                 c->partial_rx = NULL;
                 c->partial_rx_len = 0;
@@ -872,6 +892,61 @@ int64_t honk_file_size(int32_t file_fd) {
     struct stat st;
     if (fstat(file_fd, &st) < 0 || !S_ISREG(st.st_mode)) return -1;
     return (int64_t)st.st_size;
+}
+
+int64_t honk_file_mtime(int32_t file_fd) {
+    if (file_fd < 0) return 0;
+    struct stat st;
+    if (fstat(file_fd, &st) < 0) return 0;
+    return (int64_t)st.st_mtime;
+}
+
+/* Append IPv4 `a.b.c.d` for `fd` (defaults to 127.0.0.1 for in-memory tests). */
+int64_t honk_conn_ip(int32_t fd, gs_rref out) {
+    uint32_t ip = 0x7f000001U;
+    if (fd >= 0 && fd < HONK_MAX_FD && tls_conns && tls_conns[fd].active && tls_conns[fd].peer_ip != 0) {
+        ip = tls_conns[fd].peer_ip;
+    }
+    char buf[24];
+    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                     (ip >> 24) & 0xffU, (ip >> 16) & 0xffU,
+                     (ip >> 8) & 0xffU, ip & 0xffU);
+    if (n > 0) honk_rref_append(out, buf, (int64_t)n);
+    return (int64_t)n;
+}
+
+/* Lazy thread-local fixed-window rate limiter:
+ * Returns remaining quota (>= 0) when allowed, or -retry_after_sec (< 0) when exceeded. */
+int32_t honk_rate_allow(int64_t key_hash, int32_t max_reqs, int32_t window_ms) {
+    if (max_reqs <= 0 || window_ms <= 0) return 0;
+    if (!tls_rl_table) {
+        tls_rl_table = (honk_rl_slot_t *)calloc(HONK_RL_SLOTS, sizeof(honk_rl_slot_t));
+        if (!tls_rl_table) return 0;
+    }
+    int64_t now = monotonic_ms();
+    uint64_t ukey = ((uint64_t)key_hash) | 1ULL;
+    honk_rl_slot_t *s = &tls_rl_table[(uint32_t)(ukey ^ (ukey >> 32)) & (HONK_RL_SLOTS - 1)];
+    if (s->key != ukey || now >= s->reset_ms) {
+        s->key = ukey;
+        s->reset_ms = now + (int64_t)window_ms;
+        s->count = 1;
+        return max_reqs - 1;
+    }
+    if (s->count < max_reqs) {
+        s->count++;
+        return max_reqs - s->count;
+    }
+    int64_t rem_ms = s->reset_ms - now;
+    int32_t retry_s = (int32_t)((rem_ms + 999) / 1000);
+    if (retry_s < 1) retry_s = 1;
+    return -retry_s;
+}
+
+void honk_rate_reset(void) {
+    if (tls_rl_table) {
+        free(tls_rl_table);
+        tls_rl_table = NULL;
+    }
 }
 
 void honk_file_close(int32_t file_fd) {

@@ -16,6 +16,7 @@ namespace honk;
 
 import std;
 import json;
+import src.honk_net.honk_net;
 
 struct RespHdr { name: const u8[:], val: const u8[:] }
 
@@ -386,6 +387,41 @@ inline fn set_cookie(c: Ctx&, name: const u8[:], val: const u8[:], opts: const u
     c.set_header("Set-Cookie", c.tmp[start..]);
 }
 
+// Expire a cookie immediately (`Max-Age=0; HttpOnly`).
+inline fn delete_cookie(c: Ctx&, name: const u8[:], path: const u8[:] = "/") {
+    let start = c.tmp.len;
+    c.tmp.append(name);
+    c.tmp.append("=; Path=");
+    c.tmp.append(path);
+    c.tmp.append("; Max-Age=0; HttpOnly");
+    c.set_header("Set-Cookie", c.tmp[start..]);
+}
+
+// Peer socket IPv4 address (`"127.0.0.1"` in unit tests).
+inline fn client_ip(c: Ctx&) -> const u8[:] {
+    let start = c.tmp.len;
+    honk_conn_ip(c.fd, c.tmp);
+    return c.tmp[start..];
+}
+
+// Client IP aware of reverse-proxy headers (`X-Forwarded-For`, `X-Real-IP`).
+fn real_ip(c: Ctx&) -> const u8[:] {
+    let xff, ok1 = c.header("X-Forwarded-For");
+    if ok1 && xff.len > 0 {
+        var end = xff.len;
+        for ch, i in xff {
+            if ch == ',' { end = i; break; }
+        }
+        var s: i64 = 0;
+        while s < end && (xff[s] == ' ' || xff[s] == '\t') { s++; }
+        while end > s && (xff[end - 1] == ' ' || xff[end - 1] == '\t') { end--; }
+        if end > s { return xff[s..end]; }
+    }
+    let xri, ok2 = c.header("X-Real-IP");
+    if ok2 && xri.len > 0 { return xri; }
+    return c.client_ip();
+}
+
 // Stage a custom response header (max 8; extras beyond are dropped).
 fn set_header(c: Ctx&, name: const u8[:], val: const u8[:]) {
     if c.n_extra < 8 {
@@ -514,6 +550,7 @@ fn status_text(code: i64) -> const u8[:] {
     if code == 301 { return "Moved Permanently"; }
     if code == 302 { return "Found"; }
     if code == 303 { return "See Other"; }
+    if code == 304 { return "Not Modified"; }
     if code == 307 { return "Temporary Redirect"; }
     if code == 308 { return "Permanent Redirect"; }
     if code == 400 { return "Bad Request"; }
@@ -522,6 +559,7 @@ fn status_text(code: i64) -> const u8[:] {
     if code == 404 { return "Not Found"; }
     if code == 405 { return "Method Not Allowed"; }
     if code == 422 { return "Unprocessable Entity"; }
+    if code == 429 { return "Too Many Requests"; }
     return "Internal Server Error";
 }
 
@@ -550,8 +588,8 @@ fn emit(c: Ctx&, out: u8[>..]&, date: const u8[:]) {
     if !c.keep_alive {
         out.append("\r\nConnection: close");
     }
-    let no_body = c.head_only || c.status == 204;
-    let blen = if c.status == 204 { 0 } else if c.resp_len >= 0 { c.resp_len } else { c.resp_body.len };
+    let no_body = c.head_only || c.status == 204 || c.status == 304;
+    let blen = if c.status == 204 || c.status == 304 { 0 } else if c.resp_len >= 0 { c.resp_len } else { c.resp_body.len };
     out.append("\r\nContent-Length: ");
     format(out, blen);
     out.append("\r\n\r\n");
