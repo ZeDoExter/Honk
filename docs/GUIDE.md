@@ -245,20 +245,35 @@ Use `db_prepare` + `bind_*` + `stmt_step` + `col_*` + `stmt_reset` +
 `stmt_finalize`.
 
 SQLite rules:
-- Run schema DDL once in `main` before spawning multiple workers (concurrent DDL can abort with `SQLITE_SCHEMA`).
-- In multi-worker servers, open one `Db` handle per worker thread (`NOMUTEX`), finalize statements + `db_close(db)` when the worker exits, and call `db_shutdown()` once in `main` after `thread_wait`.
+- Run schema DDL once in `main` before forking or spawning workers (concurrent DDL can abort with `SQLITE_SCHEMA`).
+- **Multi-worker SQLite (`HONK_WORKERS`)**: SQLite handles must never cross `fork()` (Honk's runtime guard aborts if you try). Close your setup DDL handle first, call `honk::workers_env()` (or `honk::workers(n)`), then open each worker's own WAL handle:
+  ```goose
+  { let mdb, _ = db_open("todos.db"); db_enable_wal(mdb); db_exec(mdb, "CREATE TABLE ..."); db_close(mdb); }
+  honk::workers_env();                       // forks here when $HONK_WORKERS > 1
+  let db, _ = db_open("todos.db");           // independent WAL handle per worker
+  db_enable_wal(db);
+  honk::listen(18080) { app => … };          // drains on SIGTERM/SIGINT, joins children
+  db_close(db);
+  db_shutdown();
+  ```
 - Always call `stmt_reset(st)` on *every* exit path when stepping a reusable `Stmt`.
 - Multi-worker WAL requires a POSIX filesystem (e.g. `/tmp` or native Linux ext4, not a Windows/9P mount) for the `-shm` file.
 
 ## Multi-worker scaling & production deployment
 
-- **Single worker**: `honk::listen(port) { app => … };` runs directly on `main`.
-- **Multi-worker (`SO_REUSEPORT` + CPU pinning)**: put your `app.get/post/...`
-  routes in an `inline fn routes(app: honk::Ctx&)` and drive each `thread_fn`
-  worker with `honk::listen_cfg_or_abort(cfg)` +
-  `honk::serve() { fd, date => honk::request_app(fd, date) { app => routes(app); }; };`.
+- **Zero-code multi-worker (`$HONK_WORKERS`)**: `honk::listen(port)` runs a
+  single process by default and scales to `N` `SO_REUSEPORT` worker processes
+  with `HONK_WORKERS=4` or `HONK_WORKERS=auto` (reads `sched_getaffinity`, safe
+  in Docker/cgroups/`taskset`), or in code via `honk::listen_workers(port, n)`
+  (`0` = auto). Need thread workers with explicit CPU pinning instead? Pair
+  `thread_fn` + `honk::listen_cfg_or_abort` + `honk::request_app`.
+- **Graceful shutdown (`SIGINT` / `SIGTERM`)**: `Ctrl-C`, `systemctl stop`, and
+  `docker stop` close the listening socket immediately, finish the current
+  turn's requests, forward `SIGTERM` to any forked workers, and flush queued
+  outbound bytes (`pending_tx` / `sendfile`) for up to `2s` before exiting `0`
+  (a second `SIGINT` force-exits immediately).
 - **Binary**: `./honk build my-api --release` → `my-api/dist/main` (~150 KiB,
-  libc + pthreads only). Run `./main 8080`.
+  libc + pthreads only). Run `HONK_WORKERS=auto ./main 8080`.
 - **Reverse proxy (TLS)**: terminate TLS in nginx/Caddy and proxy HTTP/1.1 to
   Honk:
   ```nginx
@@ -267,7 +282,6 @@ SQLite rules:
       location / { proxy_pass http://127.0.0.1:8080; }
   }
   ```
-- **systemd / graceful drain**: `ExecStart=/opt/my-api/main 8080`, `Restart=always`.
-  `SIGTERM` stops immediately; expose an internal shutdown route calling
-  `honk_request_stop()` if you want in-flight turn draining before exit.
+- **systemd**: `ExecStart=/opt/my-api/main 8080`, `Environment=HONK_WORKERS=auto`,
+  `Restart=always`. `SIGTERM` drains in-flight responses cleanly out of the box.
 - **Docker**: copy the repo `Dockerfile` pattern (multi-stage, pinned Goose, slim runtime).

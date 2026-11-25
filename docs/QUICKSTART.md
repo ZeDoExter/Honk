@@ -33,8 +33,9 @@ Edit `my-api/main.goose`, save — the dev server rebuilds and restarts by itsel
 ## 2. Ship it
 
 ```sh
-./honk build my-api --release     # -> my-api/dist/main  (~150 KiB, zero deps)
-./my-api/dist/main 8080           # runs anywhere Linux: VPS, VM, container
+./honk build my-api --release               # -> my-api/dist/main (~150 KiB, zero deps)
+./my-api/dist/main 8080                     # single worker; Ctrl-C / SIGTERM drains cleanly
+HONK_WORKERS=auto ./my-api/dist/main 8080   # fork SO_REUSEPORT workers across all cores
 ```
 
 Or hardened: `./honk build my-api --asan` (AddressSanitizer + UBSan + leak checks).

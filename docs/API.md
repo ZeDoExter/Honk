@@ -23,16 +23,18 @@ workspace (all reset automatically after every request).
 
 | Signature | Notes |
 |---|---|
-| `honk::listen(port: i32) { app => … };` | Single-worker server on `main`: `listen_or_abort` + `serve` + `request_app` (auto `404`/`405` + clean shutdown on `honk_request_stop()`) |
+| `honk::listen(port: i32) { app => … };` | Server on `main`: 1 worker by default, or `$HONK_WORKERS` (`1..64` / `"auto"`) `SO_REUSEPORT` processes; auto `404`/`405`; drains outbound bytes (up to `2s`) and joins workers on `SIGINT`/`SIGTERM`/`honk_request_stop()` |
+| `honk::listen_workers(port: i32, n: i32) { app => … };` | Explicit multi-worker `listen` (`n = 0` for `sched_getaffinity` CPU count, `1..64`) |
+| `honk::workers(n: i32) -> i32` / `honk::workers_env() -> i32` | Pre-`db_open()` worker fork (`0` = auto, `1..64`, or `$HONK_WORKERS`); aborts if a SQLite `Db` handle is already open |
 | `honk::listen_cfg(cfg: Config&) { app => … };` | `listen` with full `honk::Config` (timeouts, worker id, CPU pin) |
 | `honk::request_app(fd, date) { app => … };` | `inline` turn wrapper with App DSL `405`/`404` tracking; pair with `honk::serve()` in multi-worker `thread_fn`s |
 | `honk::app_run(ctx) { app => … };` | Runs block against an existing `Ctx&`, then stages `405` if `path_matched && !handled` |
 | `struct honk::Config { port, idle_ms = 30000, header_ms = 10000, worker_id = 0, cpu_id = -1 }` | `-1` = no CPU pinning |
 | `honk::listen_or_abort(port: i32)` | Low-level init (default timeouts, no pin); aborts on failure |
 | `honk::listen_cfg_or_abort(cfg: Config&)` | Low-level init with full `Config`; aborts on failure |
-| `honk::serve() { fd, date => … };` | `inline` epoll loop; calls `honk_worker_shutdown()` when `honk_should_stop() != 0` |
+| `honk::serve() { fd, date => … };` | `inline` epoll loop; wakes on `SIGINT`/`SIGTERM`/`honk_request_stop()` and runs `honk_worker_shutdown()` |
 | `honk::request(fd, date) { ctx => … };` | Low-level turn without `405` route tracking (unstaged requests default to `404`) |
-| `honk_request_stop()` / `honk_should_stop() -> i32` | Request / query clean loop exit for the current worker |
+| `honk_request_stop()` / `honk_should_stop() -> i32` | Programmatic stop (propagates across forked workers) / query stop flag |
 
 ## Declarative routes (`honk::Ctx&` as `app`, first-match-wins)
 
@@ -145,9 +147,10 @@ routes also accept `HEAD`).
 
 ## Low-level transport (`honk_net`, rarely needed in apps)
 
-`honk_worker_init/shutdown`, `honk_wait`, `honk_conn_read`, `honk_parse_req`,
-`honk_send`, `honk_sendfile_data`, `honk_conn_finish`, `honk_close`,
-`honk_pin_thread_cpu`, `honk_set_timeouts`, telemetry (`honk_worker_id`,
-`honk_active_conns`, `honk_accepted_total`, `honk_rejected_conns`,
-`honk_timed_out_conns`, `honk_tx_queued_count`), `honk_shrink_sndbuf`,
-`honk_debug_stack_top/base`, `RawReq`, `write_response`, `write_error_response`.
+`honk_worker_init/shutdown`, `honk_fork_workers/fork_env/fork_join`, `honk_wait`,
+`honk_conn_read`, `honk_parse_req`, `honk_send`, `honk_sendfile_data`,
+`honk_conn_finish`, `honk_close`, `honk_pin_thread_cpu`, `honk_set_timeouts`,
+telemetry (`honk_worker_id`, `honk_active_conns`, `honk_accepted_total`,
+`honk_rejected_conns`, `honk_timed_out_conns`, `honk_tx_queued_count`),
+`honk_shrink_sndbuf`, `honk_debug_stack_top/base`, `RawReq`, `write_response`,
+`write_error_response`.

@@ -68,9 +68,10 @@ How it gets there:
 ## Build, test, deploy
 
 ```sh
-./honk test                        # everything: 900k turns + suites + ASan
-./honk build my-api --release      # -> my-api/dist/main, zero dependencies
-./my-api/dist/main 8080
+./honk test                              # everything: 900k turns + suites + ASan
+./honk build my-api --release            # -> my-api/dist/main, zero dependencies
+./my-api/dist/main 8080                  # single worker (SIGINT/SIGTERM drains cleanly)
+HONK_WORKERS=auto ./my-api/dist/main 8080  # scale across all available CPU cores
 ```
 
 ```sh
@@ -157,7 +158,9 @@ extractors, query + percent-decoding, headers, composable guards, CORS, cookies,
 bearer auth, `HEAD`, kernel-`sendfile` static serving (`static_dir`), opt-in SQLite
 (WAL, one-line `sql_json`/`sql_json_one`/`insert_text`/`run_int` + low-level `Stmt`),
 strict `400`/`404`/`405` + `413`/`431`/`501` caps, idle + slowloris timeouts,
-`SO_REUSEPORT` multi-worker with CPU pinning, Linux `epoll`, Docker + GitHub Actions CI.
+`SIGINT`/`SIGTERM` graceful outbound drain, zero-code `$HONK_WORKERS` /
+`honk::listen_workers` `SO_REUSEPORT` multi-core scaling (plus `thread_fn` CPU
+pinning), Linux `epoll`, Docker + GitHub Actions CI.
 
 **Not yet**: TLS (terminate at a reverse proxy), HTTP/2+, chunked request bodies
 (`501`), WebSockets. See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the
