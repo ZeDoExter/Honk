@@ -123,63 +123,7 @@ SCAFFOLD_MAIN = '''// {name} -- a Honk application.
 
 import std;
 import os;
-import json;
-import honk_net from "{root}/src/honk_net";
-import honk_ctx from "{root}/src/honk_ctx";
-import honk_serve from "{root}/src/honk_serve";
-
-struct NewUser {{ name: const u8[:], has_name: bool, age: i64, has_age: bool }}
-
-fn parse_newuser(r: json::Reader&, scratch: u8[>..]&, u: NewUser&) -> bool {{
-    json::each_member(r) {{ key =>
-        if key == "name" {{
-            u.name = json::read_string(r, scratch);
-            u.has_name = true;
-        }} else if key == "age" {{
-            u.age = json::read_int(r);
-            u.has_age = true;
-        }} else {{
-            json::skip(r);
-        }}
-    }};
-    if !json::finish(r) {{ return false; }}
-    if !u.has_name || !u.has_age {{ return false; }}
-    return true;
-}}
-
-thread_fn worker(port: i32) {{
-    honk::listen_or_abort(port);
-    honk::serve() {{ fd, date =>
-        honk::request(fd, date) {{ ctx =>
-            if ctx.method == "OPTIONS" {{
-                ctx.cors_preflight();   // React/Vite/Next.js preflights
-            }} else if ctx.method == "GET" && ctx.path == "/" {{
-                ctx.text(200, "Hello from {name}!");
-            }} else if ctx.method == "GET" {{
-                let seg, ok = match_1param(ctx.path, "/users/");
-                if ok {{
-                    ctx.res.append("{{\\"id\\":");
-                    json::format_string(ctx.res, seg);
-                    ctx.res.push('}}');
-                    ctx.json_raw(200, ctx.res[..]);
-                }}
-            }} else if ctx.method == "POST" && ctx.path == "/users" {{
-                var u = NewUser {{ name: "", .. }};
-                var r = json::reader(ctx.body);
-                if !parse_newuser(r, ctx.tmp, u) || u.name.len == 0 {{
-                    ctx.json_error(400, "name (string) and age (int) are required");
-                }} else {{
-                    ctx.res.append("{{\\"created\\":true,\\"name\\":");
-                    json::format_string(ctx.res, u.name);
-                    ctx.res.append(",\\"age\\":");
-                    format(ctx.res, u.age);
-                    ctx.res.push('}}');
-                    ctx.json_raw(201, ctx.res[..]);
-                }}
-            }}
-        }};
-    }};
-}}
+import honk from "{root}/src";
 
 fn main() {{
     var port: i32 = 18080;
@@ -190,8 +134,28 @@ fn main() {{
     }}
     print("{name} listening on port ", port);
     flush_stdout();
-    let tid = thread_spawn(worker, port);
-    thread_wait(tid);
+    honk::listen(port) {{ app =>
+        app.get_text("/", "Hello from {name}!");
+        app.get_param("/users/:id") {{ id =>
+            app.json() {{ j =>
+                j.str("id", id);
+            }};
+        }};
+        app.post("/users") {{
+            app.require_str("name") {{ n =>
+                let age, has_age = app.body_int("age");
+                if !has_age {{
+                    app.json_error(400, "name (string) and age (int) are required");
+                }} else {{
+                    app.created_json() {{ j =>
+                        j.jbool("created", true);
+                        j.str("name", n);
+                        j.int("age", age);
+                    }};
+                }}
+            }};
+        }};
+    }};
 }}
 '''
 
