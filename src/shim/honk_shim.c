@@ -6,9 +6,10 @@
  *  - Amendment B / D-004: Zero mutable shared globals; all worker state is
  *    thread-local (__thread).
  *  - Amendment C: split recv(), pipelined requests, partial send() (EAGAIN +
- *    EPOLLOUT), max header size (431), max body size (413), chunked (501),
- *    malformed (400), idle & slowloris timeouts, clean peer close/reset,
- *    Content-Length bodies, dynamic Content-Length, 1 Hz per-worker Date cache.
+ *    EPOLLOUT), max header size (431), max body size (413), chunked request
+ *    decoding + unsupported TE (501), malformed (400), idle & slowloris
+ *    timeouts, clean peer close/reset, Content-Length bodies, dynamic
+ *    Content-Length, 1 Hz per-worker Date cache.
  *  - Requirement E: All gs_rref / stk->top access isolated in honk_rref.h;
  *    every code path restores/preserves stack top baseline.
  *  - Requirement F: 4096 active connection cap per worker (clean reject above
@@ -50,10 +51,11 @@
 #define HONK_MAX_WORKERS      64
 #define HONK_DRAIN_MS         2000
 
-#define HONK_MAX_HEADER_SIZE  8192
-#define HONK_MAX_BODY_SIZE    1048576
-#define HONK_MAX_PARTIAL_RX   (HONK_MAX_HEADER_SIZE + HONK_MAX_BODY_SIZE)
-#define HONK_MAX_PENDING_TX   1048576
+#define HONK_MAX_HEADER_SIZE    8192
+#define HONK_MAX_BODY_SIZE      1048576
+#define HONK_MAX_CHUNK_OVERHEAD 16384
+#define HONK_MAX_PARTIAL_RX     (HONK_MAX_HEADER_SIZE + HONK_MAX_BODY_SIZE + HONK_MAX_CHUNK_OVERHEAD)
+#define HONK_MAX_PENDING_TX     1048576
 
 #pragma pack(push, 1)
 typedef struct {
@@ -671,14 +673,135 @@ static int header_contains_token_ci(const char *val, size_t len, const char *tok
     return 0;
 }
 
+static int is_exact_token_ci(const char *val, size_t len, const char *tok, size_t tok_len) {
+    size_t s = 0;
+    while (s < len && (val[s] == ' ' || val[s] == '\t')) s++;
+    while (len > s && (val[len - 1] == ' ' || val[len - 1] == '\t')) len--;
+    return (len - s == tok_len) && (strncasecmp(val + s, tok, tok_len) == 0);
+}
+
+/* Two-pass RFC 9112 §7.1 chunked body decoder:
+ *  - Pass 1 scans framing without mutating `base`, so incomplete (-2) split
+ *    recvs preserve raw wire bytes in partial_rx and pipelined bytes past the
+ *    terminal chunk are never touched.
+ *  - Pass 2 compacts chunk payloads in-place into base[0..*out_decoded_len]. */
+static int decode_chunked_body(uint8_t *base, size_t avail,
+                               size_t *out_decoded_len, size_t *out_wire_len) {
+    size_t pos = 0;
+    size_t decoded_total = 0;
+
+    for (;;) {
+        if (pos - decoded_total > HONK_MAX_CHUNK_OVERHEAD) return -400;
+        if (pos == avail) return -2;
+
+        uint64_t chunk_sz = 0;
+        int hex_digits = 0;
+        while (pos < avail) {
+            uint8_t ch = base[pos];
+            int hv = -1;
+            if (ch >= '0' && ch <= '9') hv = ch - '0';
+            else if (ch >= 'a' && ch <= 'f') hv = (ch - 'a') + 10;
+            else if (ch >= 'A' && ch <= 'F') hv = (ch - 'A') + 10;
+            if (hv < 0) break;
+            if (hex_digits >= 16) return -400;
+            chunk_sz = (chunk_sz << 4) | (uint64_t)hv;
+            hex_digits++;
+            pos++;
+            if (chunk_sz > HONK_MAX_BODY_SIZE ||
+                decoded_total + (size_t)chunk_sz > HONK_MAX_BODY_SIZE) {
+                return -413;
+            }
+        }
+        if (pos == avail) return -2;
+        if (hex_digits == 0) return -400;
+
+        uint8_t sep = base[pos];
+        if (sep != '\r' && sep != ';' && sep != ' ' && sep != '\t') {
+            return -400;
+        }
+        while (pos < avail && base[pos] != '\r') {
+            if (base[pos] == '\n') return -400;
+            pos++;
+            if (pos - decoded_total > HONK_MAX_CHUNK_OVERHEAD) return -400;
+        }
+        if (pos + 1 >= avail) return -2;
+        if (base[pos + 1] != '\n') return -400;
+        pos += 2;
+
+        if (chunk_sz == 0) {
+            /* Consume optional trailer lines up to the terminating CRLF. */
+            for (;;) {
+                if (pos - decoded_total > HONK_MAX_CHUNK_OVERHEAD) return -400;
+                if (pos + 1 >= avail) {
+                    if (pos < avail && base[pos] == '\n') return -400;
+                    return -2;
+                }
+                if (base[pos] == '\r' && base[pos + 1] == '\n') {
+                    pos += 2;
+                    goto scan_complete;
+                }
+                if (base[pos] == '\r' || base[pos] == '\n') return -400;
+                while (pos < avail && base[pos] != '\r') {
+                    if (base[pos] == '\n') return -400;
+                    pos++;
+                    if (pos - decoded_total > HONK_MAX_CHUNK_OVERHEAD) return -400;
+                }
+                if (pos + 1 >= avail) return -2;
+                if (base[pos + 1] != '\n') return -400;
+                pos += 2;
+            }
+        }
+
+        size_t csz = (size_t)chunk_sz;
+        if (avail - pos < csz + 2) {
+            if (avail - pos > csz && base[pos + csz] != '\r') return -400;
+            return -2;
+        }
+        if (base[pos + csz] != '\r' || base[pos + csz + 1] != '\n') {
+            return -400;
+        }
+        decoded_total += csz;
+        pos += csz + 2;
+    }
+
+scan_complete:;
+    size_t wire_end = pos;
+    size_t src = 0;
+    size_t dst = 0;
+    while (src < wire_end) {
+        size_t csz = 0;
+        while (src < wire_end) {
+            uint8_t ch = base[src];
+            size_t hv;
+            if (ch >= '0' && ch <= '9') hv = (size_t)(ch - '0');
+            else if (ch >= 'a' && ch <= 'f') hv = (size_t)(ch - 'a') + 10;
+            else if (ch >= 'A' && ch <= 'F') hv = (size_t)(ch - 'A') + 10;
+            else break;
+            csz = (csz << 4) | hv;
+            src++;
+        }
+        while (base[src] != '\r') src++;
+        src += 2;
+        if (csz == 0) break;
+        if (dst != src) {
+            memmove(base + dst, base + src, csz);
+        }
+        dst += csz;
+        src += csz + 2;
+    }
+    *out_decoded_len = dst;
+    *out_wire_len = wire_end;
+    return 0;
+}
+
 /* Parse one HTTP request at the start of `buf` via picohttpparser.
  * Returns:
- *   > 0   : total request bytes consumed (headers + Content-Length body)
+ *   > 0   : total wire bytes consumed (headers + Content-Length or chunked body)
  *   -2    : incomplete request (headers <= 8192 and body <= 1048576, need more bytes)
- *   -400  : malformed request (400 Bad Request)
- *   -413  : Content-Length > HONK_MAX_BODY_SIZE (413 Payload Too Large)
+ *   -400  : malformed request or CL+TE smuggling attempt (400 Bad Request)
+ *   -413  : body > HONK_MAX_BODY_SIZE (413 Payload Too Large)
  *   -431  : header size > HONK_MAX_HEADER_SIZE (431 Request Header Fields Too Large)
- *   -501  : Transfer-Encoding: chunked (501 Not Implemented)
+ *   -501  : unsupported Transfer-Encoding (501 Not Implemented)
  */
 int32_t honk_parse_req(sl_u8_shim buf, RawReq_g *out) {
     if (buf.len <= 0) return -2;
@@ -722,15 +845,20 @@ int32_t honk_parse_req(sl_u8_shim buf, RawReq_g *out) {
     int keep_alive = (minor_version >= 1) ? 1 : 0;
     size_t content_len = 0;
     int has_content_len = 0;
+    int has_te = 0;
+    int is_chunked = 0;
 
     for (size_t h = 0; h < num_headers; h++) {
         if (headers[h].name == NULL) continue; /* multiline continuation */
         if (headers[h].name_len == 17 &&
             strncasecmp(headers[h].name, "Transfer-Encoding", 17) == 0) {
-            if (header_contains_token_ci(headers[h].value, headers[h].value_len, "chunked", 7)) {
+            if (has_te) return -400;
+            has_te = 1;
+            if (is_exact_token_ci(headers[h].value, headers[h].value_len, "chunked", 7)) {
+                is_chunked = 1;
+            } else {
                 return -501;
             }
-            return -501;
         } else if (headers[h].name_len == 14 &&
                    strncasecmp(headers[h].name, "Content-Length", 14) == 0) {
             size_t parsed_cl = 0;
@@ -755,14 +883,38 @@ int32_t honk_parse_req(sl_u8_shim buf, RawReq_g *out) {
         }
     }
 
-    size_t total_req = (size_t)pret + content_len;
-    if (total_req > (size_t)buf.len) {
-        return -2;
+    /* RFC 9112 §6.1: reject requests carrying both Transfer-Encoding and Content-Length. */
+    if (has_te && has_content_len) {
+        return -400;
     }
 
     const char *base = (const char *)buf.data;
     int32_t m_off = (int32_t)(method - base);
     int32_t p_off = (int32_t)(path - base);
+
+    if (is_chunked) {
+        size_t decoded_len = 0;
+        size_t wire_len = 0;
+        int cret = decode_chunked_body(buf.data + pret, (size_t)buf.len - (size_t)pret,
+                                       &decoded_len, &wire_len);
+        if (cret < 0) return (int32_t)cret;
+        size_t total_wire = (size_t)pret + wire_len;
+        out->method_off_g = m_off;
+        out->method_end_g = m_off + (int32_t)method_len;
+        out->path_off_g = p_off;
+        out->path_end_g = p_off + (int32_t)path_len;
+        out->body_off_g = (int32_t)pret;
+        out->body_end_g = (int32_t)((size_t)pret + decoded_len);
+        out->consumed_g = (int32_t)total_wire;
+        out->keep_alive_g = keep_alive;
+        return (int32_t)total_wire;
+    }
+
+    size_t total_req = (size_t)pret + content_len;
+    if (total_req > (size_t)buf.len) {
+        return -2;
+    }
+
     out->method_off_g = m_off;
     out->method_end_g = m_off + (int32_t)method_len;
     out->path_off_g = p_off;
