@@ -461,10 +461,7 @@ def test_fullstack_e2e(label):
             code, _, _ = read_response(f)
             assert code == 404, code
             s.close()
-            s = socket.create_connection(("127.0.0.1", port), timeout=2.0)
-            s.sendall(b"POST /__shutdown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            s.recv(256)
-            s.close()
+            proc.terminate()
             assert proc.wait(timeout=10) == 0
         finally:
             if proc.poll() is None:
@@ -475,6 +472,49 @@ def test_fullstack_e2e(label):
     for m in (b"AddressSanitizer", b"runtime error:", b"LeakSanitizer", b"SUMMARY:"):
         assert m not in err, f"[{label}-fs] sanitizer hit: {err[-1500:]!r}"
     print("  [PASS] test_fullstack_e2e")
+
+
+def test_db_fork_and_guard(server_bin, port, label):
+    root, dbpath, _ = setup_fixtures(label + "fk")
+    try:
+        # 1. Forking while a SQLite Db handle is open must abort with a clear hint.
+        bad = subprocess.run([server_bin, str(port), root, "badfork", dbpath],
+                             capture_output=True, cwd=ROOT, timeout=10)
+        assert bad.returncode != 0, "badfork should have aborted"
+        assert b"cannot fork 2 workers with an open SQLite handle" in bad.stderr, bad.stderr
+
+        # 2. honk::workers(2) before db_open + SIGTERM drains both WAL workers cleanly.
+        err_path = f"/tmp/honkfs_{label}_fk2_stderr.txt"
+        with open(err_path, "wb") as err_fh:
+            proc = subprocess.Popen([server_bin, str(port), root, "fork2", dbpath],
+                                    stdout=subprocess.PIPE, stderr=err_fh, cwd=ROOT)
+            try:
+                proc.stdout.readline()
+                wait_for_port(port)
+                for i in range(16):
+                    payload = pyjson.dumps({"name": f"fk-{i}", "age": i}).encode()
+                    s, f = req(port, b"POST /db HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                                     b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(payload) + payload)
+                    code, _, _ = read_response(f)
+                    s.close()
+                    assert code == 201, code
+                s, f = req(port, b"GET /db/all HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                code, _, body = read_response(f)
+                s.close()
+                assert code == 200 and len(pyjson.loads(body)) == 16, (code, body)
+                proc.terminate()
+                assert proc.wait(timeout=10) == 0
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait()
+        with open(err_path, "rb") as fh:
+            err = fh.read()
+        for m in (b"AddressSanitizer", b"runtime error:", b"LeakSanitizer", b"SUMMARY:"):
+            assert m not in err, f"[{label}-fk2] sanitizer hit: {err[-1500:]!r}"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("  [PASS] test_db_fork_and_guard (open-db guard + 2-process WAL + SIGTERM LSan exit 0)")
 
 
 def wait_for_port(port, timeout=5.0):
@@ -521,8 +561,9 @@ def run_suite(server_bin, port, label):
     for m in (b"AddressSanitizer", b"runtime error:", b"LeakSanitizer", b"SUMMARY:"):
         assert m not in err, f"[{label}] sanitizer hit: {err[-1500:]!r}"
     test_db_2workers(server_bin, port + 50, label)
+    test_db_fork_and_guard(server_bin, port + 55, label)
     test_fullstack_e2e(label)
-    print(f"=== ALL 10 FULLSTACK TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 11 FULLSTACK TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":

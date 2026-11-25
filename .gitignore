@@ -17,6 +17,8 @@ test/test_stack_discipline
 test/test_stack_discipline_asan
 test/helpers_app
 test/helpers_app_asan
+test/app_dsl
+test/app_dsl_asan
 test/app_fullstack
 test/app_fullstack_asan
 examples/fullstack_todo/app

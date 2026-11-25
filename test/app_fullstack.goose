@@ -178,10 +178,16 @@ fn main() {
         if ok { port = v as! i32; }
     }
     if a.len > 3 {
-        let v, ok = parse_int(a[3]);
-        if ok { num_workers = v as! i32; }
+        if a[3] == "fork2" {
+            num_workers = -2;
+        } else if a[3] == "badfork" {
+            num_workers = -99;
+        } else {
+            let v, ok = parse_int(a[3]);
+            if ok { num_workers = v as! i32; }
+        }
     }
-    assert(num_workers >= 1 && num_workers <= 4);
+    assert((num_workers >= 1 && num_workers <= 4) || num_workers == -2 || num_workers == -99);
     // Static root copied byte-wise (argv/static roots must not mix).
     var rootbuf: u8[256] = [0; 256];
     var root_len: i64 = 0;
@@ -215,7 +221,46 @@ fn main() {
         guard mok else { abort("main db_open failed"); }
         guard db_enable_wal(mdb) else { abort("main wal setup failed"); }
         guard db_exec(mdb, "CREATE TABLE IF NOT EXISTS kv(id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER NOT NULL);") else { abort("main ddl failed"); }
+        if num_workers == -99 {
+            // Intentional misuse test: forking while mdb is still open must abort.
+            honk::workers(2);
+        }
         db_close(mdb);
+    }
+    if num_workers == -2 {
+        print("app_fullstack fork2 listening on port ", port);
+        flush_stdout();
+        honk::workers(2);
+        let db, dbok = db_open(dbbuf[..db_len]);
+        guard dbok && db_enable_wal(db) else { abort("fork db setup failed"); }
+        honk::listen(port) { app =>
+            app.get("/db/all") {
+                app.sql_json(db, "SELECT id, name, age FROM kv ORDER BY id;");
+            };
+            app.post("/db") {
+                app.require_str("name") { nm =>
+                    let age, aok = app.body_int("age");
+                    if !aok {
+                        app.json_error(400, "age required");
+                    } else {
+                        let id, iok = insert_text(db, "INSERT INTO kv(name, age) VALUES (?1, 0);", nm);
+                        let _, uok = run_int(db, "UPDATE kv SET age = age WHERE id = ?1;", id);
+                        if !iok || !uok {
+                            app.json_error(500, "insert failed");
+                        } else {
+                            app.created_json() { j =>
+                                j.int("id", id);
+                                j.int("worker", honk_worker_id() as! i64);
+                                j.int("age", age);
+                            };
+                        }
+                    }
+                };
+            };
+        };
+        db_close(db);
+        db_shutdown();
+        return;
     }
     print("app_fullstack listening on port ", port);
     flush_stdout();
