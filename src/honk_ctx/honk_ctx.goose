@@ -553,6 +553,7 @@ fn status_text(code: i64) -> const u8[:] {
     if code == 200 { return "OK"; }
     if code == 201 { return "Created"; }
     if code == 204 { return "No Content"; }
+    if code == 206 { return "Partial Content"; }
     if code == 301 { return "Moved Permanently"; }
     if code == 302 { return "Found"; }
     if code == 303 { return "See Other"; }
@@ -564,9 +565,22 @@ fn status_text(code: i64) -> const u8[:] {
     if code == 403 { return "Forbidden"; }
     if code == 404 { return "Not Found"; }
     if code == 405 { return "Method Not Allowed"; }
+    if code == 408 { return "Request Timeout"; }
+    if code == 409 { return "Conflict"; }
+    if code == 412 { return "Precondition Failed"; }
+    if code == 413 { return "Payload Too Large"; }
+    if code == 414 { return "URI Too Long"; }
+    if code == 415 { return "Unsupported Media Type"; }
+    if code == 416 { return "Range Not Satisfiable"; }
     if code == 422 { return "Unprocessable Entity"; }
     if code == 426 { return "Upgrade Required"; }
     if code == 429 { return "Too Many Requests"; }
+    if code == 431 { return "Request Header Fields Too Large"; }
+    if code == 500 { return "Internal Server Error"; }
+    if code == 501 { return "Not Implemented"; }
+    if code == 502 { return "Bad Gateway"; }
+    if code == 503 { return "Service Unavailable"; }
+    if code == 504 { return "Gateway Timeout"; }
     return "Internal Server Error";
 }
 
