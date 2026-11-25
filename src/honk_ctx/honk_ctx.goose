@@ -426,8 +426,167 @@ fn real_ip(c: Ctx&) -> const u8[:] {
     if ok2 && xri.len > 0 { return xri; }
     return c.client_ip();
 }
+// Trusted reverse-proxy networks, parsed once in `main` via `parse_cidrs`
+// and passed per request to `real_ip_trusted` (max 8 networks).
+struct Cidrs {
+    nets: u32[8],
+    masks: u32[8],
+    n: i64,
+}
 
-// Stage a custom response header (max 8; extras beyond are dropped).
+// Strict dotted-quad parse (`a.b.c.d`, 0-255 per octet). No DNS, no IPv6.
+fn parse_ipv4(s: const u8[:]) -> u32, bool {
+    var parts: i64[4] = [0; 4];
+    var n: i64 = 0;
+    var pos: i64 = 0;
+    while pos <= s.len {
+        var end = s.len;
+        var i = pos;
+        while i < s.len {
+            if s[i] == '.' { end = i; break; }
+            i++;
+        }
+        if n >= 4 || end == pos || end - pos > 3 { return 0, false; }
+        var v: i64 = 0;
+        var j = pos;
+        while j < end {
+            if s[j] < '0' || s[j] > '9' { return 0, false; }
+            v = v * 10 + (s[j] - '0');
+            j++;
+        }
+        if v > 255 { return 0, false; }
+        parts[n] = v;
+        n++;
+        if end == s.len { break; }
+        pos = end + 1;
+    }
+    if n != 4 { return 0, false; }
+    return ((parts[0] as! u32) << 24) | ((parts[1] as! u32) << 16)
+         | ((parts[2] as! u32) << 8) | (parts[3] as! u32), true;
+}
+
+// Parse `"127.0.0.1,10.0.0.0/8"` into masked networks (max 8, extras
+// dropped; bare IPs mean /32; malformed entries skipped). False when
+// nothing usable parsed.
+fn parse_cidrs(s: const u8[:]) -> Cidrs, bool {
+    var c = Cidrs { nets: [0; 8], masks: [0; 8], n: 0 };
+    var pos: i64 = 0;
+    while pos <= s.len {
+        var end = s.len;
+        var i = pos;
+        while i < s.len {
+            if s[i] == ',' { end = i; break; }
+            i++;
+        }
+        var es = pos;
+        while es < end && (s[es] == ' ' || s[es] == '\t') { es++; }
+        var ee = end;
+        while ee > es && (s[ee - 1] == ' ' || s[ee - 1] == '\t') { ee--; }
+        if ee > es {
+            var slash = -1;
+            var k = es;
+            while k < ee {
+                if s[k] == '/' { slash = k; break; }
+                k++;
+            }
+            let ip_end = if slash < 0 { ee } else { slash };
+            let ip, ok = parse_ipv4(s[es..ip_end]);
+            if ok {
+                var bits: i64 = 32;
+                var bok = true;
+                if slash >= 0 {
+                    if slash + 1 >= ee { bok = false; }
+                    else {
+                        var b: i64 = 0;
+                        var m = slash + 1;
+                        while m < ee {
+                            if s[m] < '0' || s[m] > '9' { bok = false; break; }
+                            b = b * 10 + (s[m] - '0');
+                            m++;
+                        }
+                        if b < 0 || b > 32 { bok = false; }
+                        else { bits = b; }
+                    }
+                }
+                if bok && c.n < 8 {
+                    let sh: u32 = (32 - bits) as! u32;
+                    let mask: u32 = if bits == 0 { 0 } else { (0xffffffff as! u32) << sh };
+                    c.nets[c.n] = ip & mask;
+                    c.masks[c.n] = mask;
+                    c.n++;
+                }
+            }
+        }
+        if end == s.len { break; }
+        pos = end + 1;
+    }
+    return c, c.n > 0;
+}
+
+inline fn ip_in_nets(ip: u32, nets: Cidrs) -> bool {
+    let n = if nets.n <= 8 { nets.n } else { 8 };
+    for i in n {
+        if (ip & nets.masks[i]) == nets.nets[i] { return true; }
+    }
+    return false;
+}
+
+// Spoof-resistant client IP: proxy headers are honored ONLY when the socket
+// peer itself is trusted (`client_ip` in `nets`). `X-Forwarded-For` is then
+// walked RIGHT to LEFT, skipping trusted hops, returning the first
+// non-trusted hop (an external client can only spoof entries LEFT of what
+// the trusted proxy appended). Falls back to a syntactically valid
+// `X-Real-IP`, else the socket peer (fail-closed on malformed hops).
+fn real_ip_trusted(c: Ctx&, nets: Cidrs) -> const u8[:] {
+    let peer = c.client_ip();
+    let peer_ip, peer_ok = parse_ipv4(peer);
+    if !peer_ok || !ip_in_nets(peer_ip, nets) { return peer; }
+    let xff, ok1 = c.header("X-Forwarded-For");
+    if ok1 && xff.len > 0 {
+        var hops: const u8[:][16] = [xff[..0]; 16];
+        var nh: i64 = 0;
+        var pos: i64 = 0;
+        while pos <= xff.len && nh < 16 {
+            var end = xff.len;
+            var i = pos;
+            while i < xff.len {
+                if xff[i] == ',' { end = i; break; }
+                i++;
+            }
+            var hs = pos;
+            while hs < end && (xff[hs] == ' ' || xff[hs] == '\t') { hs++; }
+            var he = end;
+            while he > hs && (xff[he - 1] == ' ' || xff[he - 1] == '\t') { he--; }
+            if he > hs {
+                hops[nh] = xff[hs..he];
+                nh++;
+            }
+            if end == xff.len { break; }
+            pos = end + 1;
+        }
+        var k = nh - 1;
+        while k >= 0 {
+            let hip, hok = parse_ipv4(hops[k]);
+            if !hok { return peer; }
+            if !ip_in_nets(hip, nets) { return hops[k]; }
+            k--;
+        }
+    }
+    let xri, ok2 = c.header("X-Real-IP");
+    if ok2 && xri.len > 0 {
+        var rs = 0;
+        while rs < xri.len && (xri[rs] == ' ' || xri[rs] == '\t') { rs++; }
+        var re = xri.len;
+        while re > rs && (xri[re - 1] == ' ' || xri[re - 1] == '\t') { re--; }
+        if re > rs {
+            let _, rok = parse_ipv4(xri[rs..re]);
+            if rok { return xri[rs..re]; }
+        }
+    }
+    return peer;
+}
+
+// Stage a custom response header (max 16; extras beyond are dropped).
 fn set_header(c: Ctx&, name: const u8[:], val: const u8[:]) {
     if c.n_extra < 16 {
         c.extras[c.n_extra] = RespHdr { name: name, val: val };

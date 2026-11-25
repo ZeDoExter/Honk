@@ -167,10 +167,12 @@ inline fn rate_limit_key(app: Ctx&, key: const u8[:], max_reqs: i32, window_sec:
     }
 }
 
-// Per-client-IP rate limiter (`X-Forwarded-For` / `X-Real-IP` / socket peer IP).
+// Per-client-IP rate limiter keyed by the SOCKET peer IP (unspoofable).
+// Behind a reverse proxy, key explicitly instead:
+// `app.rate_limit_key(app.real_ip_trusted(nets), max, win)`.
 inline fn rate_limit(app: Ctx&, max_reqs: i32, window_sec: i32) {
     if app.handled { return; }
-    let ip = app.real_ip();
+    let ip = app.client_ip();
     app.rate_limit_key(ip, max_reqs, window_sec);
 }
 

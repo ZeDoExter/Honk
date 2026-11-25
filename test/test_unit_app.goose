@@ -112,6 +112,12 @@ fn api_routes(app: honk::Ctx&) {
             app.ok(app.real_ip());
         };
     };
+    app.group("/proxy-ip") {
+        app.get("/via") {
+            let nets, _ = honk::parse_cidrs("127.0.0.0/8,10.0.0.0/8");
+            app.ok(app.real_ip_trusted(nets));
+        };
+    };
 
     app.group("/api") {
         app.get("/", "api-index");
@@ -389,7 +395,7 @@ fn main() {
     t.get_headers("/embedded.html", inm_hdr[..]) { app => api_routes(app); };
     assert(t.status == 304 && t.body() == "");
 
-    // 7. Real IP (`X-Forwarded-For`) + Per-IP Rate Limiter (3 reqs / 60s -> 429)
+    // 7. Socket-keyed rate_limit (spoof-proof) + real_ip_trusted (right-to-left XFF walk)
     let xff_a = "X-Forwarded-For: 203.0.113.9, 10.0.0.1\r\n";
     for expected_rem in 3 {
         t.get_headers("/rl/ip", xff_a) { app => api_routes(app); };
@@ -402,9 +408,19 @@ fn main() {
     let ra_h, ra_ok = t.header("Retry-After");
     assert(ra_ok && ra_h.len > 0);
 
-    // Distinct IP keeps its own quota
+    // Spoofed X-Real-IP cannot escape the socket-keyed quota
     t.get_headers("/rl/ip", "X-Real-IP: 198.51.100.7\r\n") { app => api_routes(app); };
-    assert(t.status == 200 && t.body() == "198.51.100.7");
+    assert(t.status == 429);
+
+    // Trusted-proxy RTL walk: skips trusted 10/8 hop, returns rightmost untrusted
+    t.get_headers("/proxy-ip/via", xff_a) { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "203.0.113.9");
+    // Leftmost spoof ignored: returns 203.0.113.5, NOT 1.1.1.1
+    t.get_headers("/proxy-ip/via", "X-Forwarded-For: 1.1.1.1, 203.0.113.5\r\n") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "203.0.113.5");
+    // All hops trusted -> falls back to socket peer
+    t.get_headers("/proxy-ip/via", "X-Forwarded-For: 10.1.2.3\r\n") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "127.0.0.1");
 
     // 8. URL-encoded form + require_form + multipart/form-data + stream + SSE
     t.post_form("/forms/submit", "full+name=Ada+Lovelace%21&age=36") { app => api_routes(app); };
