@@ -1,19 +1,12 @@
-// honk_sqlite.goose -- opt-in SQLite module (WAL + prepared statements).
+// honk_sqlite.goose -- opt-in SQLite package (WAL + SQL-to-JSON + prepared Stmt).
 //
-// One sqlite3* handle per worker thread (NOMUTEX, zero cross-thread
-// contention). All values bind via prepared statements (no SQL injection by
-// construction). Column text appends once into a caller-owned builder — a
-// single copy into request scope, zero heap Strings.
-// Linkage is opt-in: only apps whose .build lists honk_sqlite_shim.c and
-// -lsqlite3 pay for it (verified: non-SQLite binaries show no libsqlite3
-// in ldd and keep their footprint).
-//
-// Shutdown order per worker: finalize every Stmt -> db_close ->
-// (after ALL workers joined, main thread) db_shutdown() for LSan-clean exit.
+// Declared beside honk_sqlite.build so apps need no .build file of their own:
+//   import honk from "../..";
+//   import honk_sqlite from "../../sqlite";
 
 import std;
 import json;
-import honk_ctx.honk_ctx;
+import honk from "..";
 
 extern fn hsql_open(path: const u8[:], flags: i32) -> u64;
 extern fn hsql_close(db: u64) -> i32;
@@ -35,13 +28,13 @@ extern fn hsql_col_bytes(st: u64, idx: i32) -> i64;
 extern fn hsql_col_text(st: u64, idx: i32, out: u8[>..]&) -> i64;
 extern fn hsql_col_count(st: u64) -> i32;
 extern fn hsql_col_type(st: u64, idx: i32) -> i32;
+extern fn hsql_col_is_bool(st: u64, idx: i32) -> i32;
 extern fn hsql_col_name(st: u64, idx: i32, out: u8[>..]&) -> i64;
 extern fn hsql_last_id(db: u64) -> i64;
 extern fn hsql_changes(db: u64) -> i64;
 extern fn hsql_errcode(db: u64) -> i32;
 extern fn hsql_errmsg(db: u64, out: u8[>..]&) -> i64;
 
-// sqlite3_step() outcomes and open flags (mirrors sqlite3.h).
 let ROW: i32 = 100;
 let DONE: i32 = 101;
 let OPEN_READWRITE: i32 = 2;
@@ -53,15 +46,13 @@ struct Stmt { h: u64 }
 
 fn db_is_open(db: Db&) -> bool { db.h != 0 }
 fn stmt_is_ready(st: Stmt&) -> bool { st.h != 0 }
-// Open (or create) a database file. Call once per worker thread.
+
 fn db_open(path: const u8[:]) -> Db, bool {
     let h = hsql_open(path, OPEN_READWRITE | OPEN_CREATE | OPEN_NOMUTEX);
     if h == 0 { return Db { h: 0 }, false; }
     return Db { h: h }, true;
 }
 
-// Standard Honk pragmas: busy wait FIRST (so concurrent workers retry
-// instead of failing WAL setup/DDL), then WAL readers/writers, safe sync.
 fn db_enable_wal(db: Db&) -> bool {
     if hsql_exec(db.h, "PRAGMA busy_timeout=5000;") != 0 { return false; }
     if hsql_exec(db.h, "PRAGMA journal_mode=WAL;") != 0 { return false; }
@@ -74,14 +65,23 @@ fn db_exec(db: Db&, sql: const u8[:]) -> bool {
     return hsql_exec(db.h, sql) == 0;
 }
 
+// One-line setup: open + WAL/busy_timeout/foreign_keys + optional schema DDL.
+fn db_connect(path: const u8[:], schema: const u8[:] = "") -> Db {
+    let db, ok = db_open(path);
+    guard ok else { abort("db_open failed"); }
+    guard db_enable_wal(db) else { abort("db_enable_wal failed"); }
+    if schema.len > 0 {
+        guard db_exec(db, schema) else { abort("db schema exec failed"); }
+    }
+    return db;
+}
+
 fn db_close(db: Db&) -> bool {
     let rc = hsql_close(db.h);
     db.h = 0;
     return rc == 0;
 }
 
-// Release process-wide SQLite state after every handle closed (call once
-// from main after all workers joined; makes LSan fully clean).
 fn db_shutdown() -> bool {
     return hsql_shutdown() == 0;
 }
@@ -113,13 +113,10 @@ fn bind_float(st: Stmt&, idx: i32, v: f64) -> bool {
     return hsql_bind_float(st.h, idx, v) == 0;
 }
 
-// Safe default: SQLITE_TRANSIENT (SQLite copies; any lifetime OK).
 fn bind_text(st: Stmt&, idx: i32, v: const u8[:]) -> bool {
     return hsql_bind_text(st.h, idx, v, 1) == 0;
 }
 
-// Zero-copy bind: caller guarantees v outlives step+reset (static or
-// request scope). Misuse reads freed memory — prefer bind_text.
 fn bind_text_static(st: Stmt&, idx: i32, v: const u8[:]) -> bool {
     return hsql_bind_text(st.h, idx, v, 0) == 0;
 }
@@ -136,9 +133,6 @@ fn col_is_null(st: Stmt&, idx: i32) -> bool {
     return hsql_col_is_null(st.h, idx) != 0;
 }
 
-// Append the column's text once into out; returns the range (valid for the
-// whole request scope). Check ok for misuse (null handle); NULL columns
-// yield an empty range with ok == true (use col_is_null to distinguish).
 fn col_text(st: Stmt&, idx: i32, out: u8[>..]&) -> const u8[:], bool {
     let start = out.len;
     let n = hsql_col_text(st.h, idx, out);
@@ -150,15 +144,12 @@ fn db_last_id(db: Db&) -> i64 { hsql_last_id(db.h) }
 
 fn db_changes(db: Db&) -> i64 { hsql_changes(db.h) }
 
-// sqlite3_column_type() codes (mirrors sqlite3.h).
 let COL_INT: i32 = 1;
 let COL_FLOAT: i32 = 2;
 let COL_TEXT: i32 = 3;
 let COL_BLOB: i32 = 4;
 let COL_NULL: i32 = 5;
 
-// One-shot integer-param mutation: prepare -> bind -> step -> finalize.
-// Returns affected rows; ok=false on any failure. Injection-proof.
 fn run_int(db: Db&, sql: const u8[:], id: i64) -> i64, bool {
     let st, ok = db_prepare(db, sql);
     if !ok { return 0, false; }
@@ -168,7 +159,6 @@ fn run_int(db: Db&, sql: const u8[:], id: i64) -> i64, bool {
     return n, done;
 }
 
-// One-shot single-text insert: returns last_insert_rowid on success.
 fn insert_text(db: Db&, sql: const u8[:], text: const u8[:]) -> i64, bool {
     let st, ok = db_prepare(db, sql);
     if !ok { return 0, false; }
@@ -178,7 +168,6 @@ fn insert_text(db: Db&, sql: const u8[:], text: const u8[:]) -> i64, bool {
     return id, done;
 }
 
-// Column name into scratch; the range is valid for the request scope.
 fn col_name(st: Stmt&, idx: i32, out: u8[>..]&) -> const u8[:], bool {
     let start = out.len;
     let n = hsql_col_name(st.h, idx, out);
@@ -186,8 +175,8 @@ fn col_name(st: Stmt&, idx: i32, out: u8[>..]&) -> const u8[:], bool {
     return out[start..], true;
 }
 
-// One row -> {"col":val,...} appended to stream (names/texts via scratch).
-// BLOB columns fail the row (no JSON representation; loud, not silent).
+// One row -> {"col":val,...} appended to stream. Columns declared BOOLEAN /
+// BOOL in CREATE TABLE emit JSON true/false automatically.
 fn row_to_json(app: honk::Ctx&, st: Stmt&, stream: u8[>..]&) -> bool {
     let ncols = hsql_col_count(st.h);
     if ncols < 0 { return false; }
@@ -200,7 +189,11 @@ fn row_to_json(app: honk::Ctx&, st: Stmt&, stream: u8[>..]&) -> bool {
         json::format_key(stream, nm);
         let ty = hsql_col_type(st.h, i);
         if ty == COL_INT {
-            json::format_int(stream, hsql_col_int(st.h, i));
+            if hsql_col_is_bool(st.h, i) != 0 {
+                json::format_bool(stream, hsql_col_int(st.h, i) != 0);
+            } else {
+                json::format_int(stream, hsql_col_int(st.h, i));
+            }
         } else if ty == COL_FLOAT {
             json::format_number(stream, hsql_col_float(st.h, i));
         } else if ty == COL_TEXT {
@@ -219,9 +212,6 @@ fn row_to_json(app: honk::Ctx&, st: Stmt&, stream: u8[>..]&) -> bool {
     return true;
 }
 
-// SELECT -> JSON array, streamed with zero heap copies. Stages 200 on
-// success (even `[]`), 500 on any failure (never partial garbage: rows
-// assemble in scratch, then move to the response builder exactly once).
 inline fn sql_json(app: honk::Ctx&, db: Db&, sql: const u8[:]) {
     let st, ok = db_prepare(db, sql);
     if !ok {
@@ -251,8 +241,6 @@ inline fn sql_json(app: honk::Ctx&, db: Db&, sql: const u8[:]) {
     }
 }
 
-// SELECT ... WHERE id = ? (one INTEGER param) -> single object, 404 if empty.
-// Extra rows are ignored (first wins); pass LIMIT 1 to be explicit.
 inline fn sql_json_one(app: honk::Ctx&, db: Db&, sql: const u8[:], id: i64) {
     let st, ok = db_prepare(db, sql);
     if !ok || hsql_bind_int(st.h, 1, id) != 0 {
@@ -283,7 +271,6 @@ inline fn sql_json_one(app: honk::Ctx&, db: Db&, sql: const u8[:], id: i64) {
     }
 }
 
-// sql_json_one with a single TEXT param (transient bind: always safe).
 inline fn sql_json_one_text(app: honk::Ctx&, db: Db&, sql: const u8[:], val: const u8[:]) {
     let st, ok = db_prepare(db, sql);
     if !ok || hsql_bind_text(st.h, 1, val, 1) != 0 {

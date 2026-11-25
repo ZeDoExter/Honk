@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <sqlite3.h>
 
@@ -169,6 +170,13 @@ int32_t hsql_col_count(uint64_t st_h) {
 int32_t hsql_col_type(uint64_t st_h, int32_t idx) {
     if (!st_h || idx < 0) return -1;
     return (int32_t)sqlite3_column_type((sqlite3_stmt *)(uintptr_t)st_h, (int)idx);
+}
+
+int32_t hsql_col_is_bool(uint64_t st_h, int32_t idx) {
+    if (!st_h || idx < 0) return 0;
+    const char *decl = sqlite3_column_decltype((sqlite3_stmt *)(uintptr_t)st_h, (int)idx);
+    if (!decl) return 0;
+    return strncasecmp(decl, "BOOL", 4) == 0 ? 1 : 0;
 }
 
 /* Append the column's name once into the caller's builder. Returns bytes
