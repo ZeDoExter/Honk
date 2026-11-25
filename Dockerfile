@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /honk
-COPY honk.py honk ./
+COPY honk.py honk honk.goose honk.build ./
 RUN ./honk setup
 COPY src/ ./src/
 COPY examples/quickstart/ ./examples/quickstart/

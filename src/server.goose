@@ -6,9 +6,9 @@
 
 import std;
 import os;
-import honk from ".";
-import honk.honk_json.honk_json;
-import honk.honk_router.honk_router;
+import honk from "..";
+import honk.src.honk_json.honk_json;
+import honk.src.honk_router.honk_router;
 
 struct WorkerCfg {
     port: i32,

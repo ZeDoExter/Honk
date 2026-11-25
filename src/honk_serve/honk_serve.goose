@@ -25,8 +25,8 @@ namespace honk;
 
 import std;
 import json;
-import honk_net.honk_net;
-import honk_ctx.honk_ctx;
+import src.honk_net.honk_net;
+import src.honk_ctx.honk_ctx;
 
 extern fn honk_sendfile_data(fd: i32, file_fd: i32, count: i64) -> i32;
 

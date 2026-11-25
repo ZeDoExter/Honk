@@ -10,7 +10,7 @@
 // fstat S_ISREG (symlinks/dirs/FIFOs/devices never served). Non-GET/HEAD
 // stages 405. static_dir() mounts a directory in App route DSL style.
 import std;
-import honk_ctx.honk_ctx;
+import src.honk_ctx.honk_ctx;
 
 // App-level directory mount: GET/HEAD under prefix served from root.
 // Marks path_matched for 405 tracking; first-match-wins via app.handled.

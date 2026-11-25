@@ -2,24 +2,34 @@
 //
 //   honk::listen(18080) { app =>
 //       app.get("/health", "ok");
-//       app.get_param("/users/:name") { name => app.ok(name); };
-//       app.get_wild("/files/*") { path => app.ok(path); };
+//       app.get("/users/:name") { app.ok(app.param("name")); };
+//       app.get("/files/*") { app.ok(app.tail); };
 //   };
 //
-// First-match-wins: every route runs its block at most once per request; an
-// unhandled request with a path match answers 405, otherwise the turn 404s.
-// `app` is the per-request Ctx (named for readability): everything is `inline
-// fn`, so user dispatch monomorphizes into the worker loop with zero closure
-// allocations (verified: no App/route `_g` defs in generated C).
-// Blocks capture the outer `app` by reference; never `return`/`break` inside.
+// Unified pattern routing: `app.get/post/put/patch/delete` handle static
+// paths, up to 4 `:param` segments (with literal suffixes like
+// `/todos/:id/toggle`), and trailing `/*` wildcards (`app.tail`). Static
+// literals fold at compile time to a single slice comparison; everything
+// monomorphizes into the worker loop with zero closure allocations.
 
 namespace honk;
 
 import std;
+import os;
 import json;
-import honk_net.honk_net;
-import honk_ctx.honk_ctx;
-import honk_serve.honk_serve;
+import src.honk_net.honk_net;
+import src.honk_ctx.honk_ctx;
+import src.honk_serve.honk_serve;
+
+// CLI port helper: parses argv[1] when in 1..65535, else default_port.
+fn arg_port(default_port: i32) -> i32 {
+    let a = args();
+    if a.len > 1 {
+        let v, ok = parse_int(a[1]);
+        if ok && v >= 1 && v <= 65535 { return v as! i32; }
+    }
+    return default_port;
+}
 
 // One request through the App DSL: runs F, then 405 when a path matched but
 // nothing handled (the turn 404s anything still unstaged).
@@ -30,9 +40,7 @@ inline fn app_run<F>(ctx: Ctx&) {
     }
 }
 
-// Per-request App scope over a turn: use inside multi-worker `thread_fn`s
-// with a shared named routes fn (see GUIDE); single-worker apps prefer
-// honk::listen below.
+// Per-request App scope over a turn: use inside multi-worker `thread_fn`s.
 inline fn request_app<F>(fd: i32, date: const u8[:]) {
     request(fd, date) { ctx =>
         app_run(ctx) { c => F(c); };
@@ -83,108 +91,217 @@ fn listen_cfg<F>(cfg: Config&) {
     honk_fork_join();
 }
 
+// --- unified zero-copy route pattern matcher ---
+
+inline fn has_route_meta(pat: const u8[:]) -> bool {
+    for b in pat {
+        if b == ':' || b == '*' { return true; }
+    }
+    return false;
+}
+
+// Segment walker for patterns containing `:param` (up to 4, suffixes allowed)
+// or a trailing `/*` wildcard. Commits into `app` only when the full pattern
+// matches `app.path`.
+fn match_route_dyn(app: Ctx&, pat: const u8[:]) -> bool {
+    let path = app.path;
+    if pat.len == 0 || pat[0] != '/' || path.len == 0 || path[0] != '/' {
+        return false;
+    }
+    var pvals: const u8[:][4] = [path[..0]; 4];
+    var pnames: const u8[:][4] = [pat[..0]; 4];
+    var np: i64 = 0;
+
+    var pi: i64 = 1;
+    var xi: i64 = 1;
+    while pi <= pat.len {
+        var pend = pat.len;
+        var k = pi;
+        while k < pat.len {
+            if pat[k] == '/' { pend = k; break; }
+            k++;
+        }
+        let pseg = pat[pi..pend];
+
+        if pseg == "*" && pend == pat.len {
+            if xi >= path.len { return false; }
+            let rem = path[xi..];
+            if np < 4 {
+                pvals[np] = rem;
+                pnames[np] = pseg;
+                np++;
+            }
+            for idx in np {
+                app.params[idx] = pvals[idx];
+                app.param_names[idx] = pnames[idx];
+            }
+            app.n_params = np;
+            app.tail = rem;
+            return true;
+        }
+
+        if xi > path.len { return false; }
+        var xend = path.len;
+        var m = xi;
+        while m < path.len {
+            if path[m] == '/' { xend = m; break; }
+            m++;
+        }
+        let xseg = path[xi..xend];
+
+        if pseg.len > 1 && pseg[0] == ':' {
+            if xseg.len == 0 { return false; }
+            if np < 4 {
+                pvals[np] = xseg;
+                pnames[np] = pseg[1..];
+                np++;
+            }
+        } else if pseg != xseg {
+            return false;
+        }
+
+        let pat_done = pend == pat.len;
+        let path_done = xend == path.len;
+        if pat_done && path_done {
+            for idx in np {
+                app.params[idx] = pvals[idx];
+                app.param_names[idx] = pnames[idx];
+            }
+            app.n_params = np;
+            app.tail = path[..0];
+            return true;
+        }
+        if pat_done != path_done { return false; }
+        pi = pend + 1;
+        xi = xend + 1;
+    }
+    return false;
+}
+
+inline fn match_route(app: Ctx&, route: const u8[:]) -> bool {
+    if !has_route_meta(route) {
+        return app.path == route;
+    }
+    return match_route_dyn(app, route);
+}
+
 // --- static literal routes (default 200 OK) ---
 
-inline fn get_text(app: Ctx&, path: const u8[:], body: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only)
-        && app.path == path {
+inline fn get_text(app: Ctx&, route: const u8[:], body: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if (app.method == "GET" || app.head_only) && ok {
         app.text(200, body);
         app.handled = true;
     }
 }
 
-inline fn get_json_raw(app: Ctx&, path: const u8[:], body: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only)
-        && app.path == path {
+inline fn get_json_raw(app: Ctx&, route: const u8[:], body: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if (app.method == "GET" || app.head_only) && ok {
         app.json_raw(200, body);
         app.handled = true;
     }
 }
 
-// --- block routes (first-match-wins; blocks capture `app`) ---
+// --- unified pattern routes (static, `:param` + suffixes, `/*` wildcard) ---
 
-inline fn get<F>(app: Ctx&, path: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only)
-        && app.path == path {
+inline fn get<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if (app.method == "GET" || app.head_only) && ok {
         F();
         app.handled = true;
     }
 }
 
 // Static-body overload: app.get("/health", "ok").
-inline fn get(app: Ctx&, path: const u8[:], body: const u8[:]) {
-    app.get_text(path, body);
+inline fn get(app: Ctx&, route: const u8[:], body: const u8[:]) {
+    app.get_text(route, body);
 }
 
-inline fn post<F>(app: Ctx&, path: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && app.method == "POST" && app.path == path {
-        F();
-        app.handled = true;
-    }
-}
-
-inline fn put<F>(app: Ctx&, path: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && app.method == "PUT" && app.path == path {
-        F();
-        app.handled = true;
-    }
-}
-
-inline fn patch<F>(app: Ctx&, path: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && app.method == "PATCH" && app.path == path {
-        F();
-        app.handled = true;
-    }
-}
-
-inline fn delete<F>(app: Ctx&, path: const u8[:]) {
-    if app.path == path { app.path_matched = true; }
-    if !app.handled && app.method == "DELETE" && app.path == path {
-        F();
-        app.handled = true;
-    }
-}
-
-// --- single string param: app.get_param("/users/:name") { name => ... } ---
-
-inline fn get_param<F>(app: Ctx&, route: const u8[:]) {
-    let prefix = route_prefix(route);
-    let seg, ok = match_1param(app.path, prefix);
+inline fn post<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
     if ok { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only) && ok {
-        app.params[0] = seg;
-        app.n_params = 1;
-        F(seg);
+    if app.method == "POST" && ok {
+        F();
         app.handled = true;
     }
 }
 
-// The literal prefix of "/users/:name" (everything before "/:").
-inline fn route_prefix(route: const u8[:]) -> const u8[:] {
-    var i: i64 = 0;
-    while i + 1 < route.len {
-        if route[i] == '/' && route[i + 1] == ':' {
-            return route[..i + 1];
-        }
-        i++;
+inline fn put<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if app.method == "PUT" && ok {
+        F();
+        app.handled = true;
     }
-    return route;
 }
 
-// --- typed i64 param (auto-400 on non-integer) ---
+inline fn patch<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if app.method == "PATCH" && ok {
+        F();
+        app.handled = true;
+    }
+}
+
+inline fn delete<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if app.method == "DELETE" && ok {
+        F();
+        app.handled = true;
+    }
+}
+
+// --- typed i64 param routes (auto-400 on non-int; suffixes like /todos/:id/toggle OK) ---
 
 inline fn get_int<F>(app: Ctx&, route: const u8[:]) {
-    let prefix = route_prefix(route);
-    let seg, ok = match_1param(app.path, prefix);
+    if app.handled { return; }
+    let ok = match_route(app, route);
     if ok { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only) && ok {
-        let v, vok = parse_i64_strict(seg);
+    if (app.method == "GET" || app.head_only) && ok {
+        let v, vok = app.param_int(0);
+        if !vok {
+            app.json_error(400, "path parameter must be an integer");
+        } else {
+            F(v);
+        }
+        app.handled = true;
+    }
+}
+
+inline fn post_int<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if app.method == "POST" && ok {
+        let v, vok = app.param_int(0);
+        if !vok {
+            app.json_error(400, "path parameter must be an integer");
+        } else {
+            F(v);
+        }
+        app.handled = true;
+    }
+}
+
+inline fn put_int<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if app.method == "PUT" && ok {
+        let v, vok = app.param_int(0);
         if !vok {
             app.json_error(400, "path parameter must be an integer");
         } else {
@@ -195,11 +312,11 @@ inline fn get_int<F>(app: Ctx&, route: const u8[:]) {
 }
 
 inline fn patch_int<F>(app: Ctx&, route: const u8[:]) {
-    let prefix = route_prefix(route);
-    let seg, ok = match_1param(app.path, prefix);
+    if app.handled { return; }
+    let ok = match_route(app, route);
     if ok { app.path_matched = true; }
-    if !app.handled && app.method == "PATCH" && ok {
-        let v, vok = parse_i64_strict(seg);
+    if app.method == "PATCH" && ok {
+        let v, vok = app.param_int(0);
         if !vok {
             app.json_error(400, "path parameter must be an integer");
         } else {
@@ -210,11 +327,11 @@ inline fn patch_int<F>(app: Ctx&, route: const u8[:]) {
 }
 
 inline fn delete_int<F>(app: Ctx&, route: const u8[:]) {
-    let prefix = route_prefix(route);
-    let seg, ok = match_1param(app.path, prefix);
+    if app.handled { return; }
+    let ok = match_route(app, route);
     if ok { app.path_matched = true; }
-    if !app.handled && app.method == "DELETE" && ok {
-        let v, vok = parse_i64_strict(seg);
+    if app.method == "DELETE" && ok {
+        let v, vok = app.param_int(0);
         if !vok {
             app.json_error(400, "path parameter must be an integer");
         } else {
@@ -224,98 +341,44 @@ inline fn delete_int<F>(app: Ctx&, route: const u8[:]) {
     }
 }
 
-// --- two params: app.get2("/orgs/:org/repos/:repo") { org, repo => ... } ---
+// --- param-passing aliases (kept for compatibility alongside app.param/tail) ---
+
+inline fn get_param<F>(app: Ctx&, route: const u8[:]) {
+    if app.handled { return; }
+    let ok = match_route(app, route);
+    if ok { app.path_matched = true; }
+    if (app.method == "GET" || app.head_only) && ok {
+        F(app.param_str(0));
+        app.handled = true;
+    }
+}
 
 inline fn get2<F>(app: Ctx&, route: const u8[:]) {
-    let pre, mid, ok_route = split_2param(route);
-    if !ok_route { return; }
-    let a, b, ok = match_2param(app.path, pre, mid);
+    if app.handled { return; }
+    let ok = match_route(app, route);
     if ok { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only) && ok {
-        app.params[0] = a;
-        app.params[1] = b;
-        app.n_params = 2;
-        F(a, b);
+    if (app.method == "GET" || app.head_only) && ok {
+        F(app.param_str(0), app.param_str(1));
         app.handled = true;
     }
 }
-
-// "/orgs/:org/repos/:repo" -> pre "/orgs/", mid "/repos/".
-inline fn split_2param(route: const u8[:]) -> const u8[:], const u8[:], bool {
-    var first = -1;
-    var i: i64 = 0;
-    while i + 1 < route.len {
-        if route[i] == '/' && route[i + 1] == ':' {
-            first = i;
-            break;
-        }
-        i++;
-    }
-    if first < 0 { return "", "", false; }
-    var mid_start = -1;
-    var j = first + 2;
-    while j < route.len {
-        if route[j] == '/' {
-            mid_start = j;
-            break;
-        }
-        j++;
-    }
-    if mid_start <= first + 2 { return "", "", false; }
-    var k = mid_start;
-    while k + 1 < route.len {
-        if route[k] == '/' && route[k + 1] == ':' {
-            return route[..first + 1], route[mid_start .. k + 1], true;
-        }
-        k++;
-    }
-    return "", "", false;
-}
-
-// pre + seg1 + mid + seg2, non-empty segments without '/'.
-inline fn match_2param(path: const u8[:], pre: const u8[:], mid: const u8[:]) -> const u8[:], const u8[:], bool {
-    if path.len <= pre.len || path[..pre.len] != pre { return "", "", false; }
-    var mend = -1;
-    var i = pre.len;
-    while i + mid.len <= path.len {
-        if path[i..i + mid.len] == mid {
-            mend = i;
-            break;
-        }
-        i++;
-    }
-    if mend < 0 { return "", "", false; }
-    let a = path[pre.len..mend];
-    let b = path[mend + mid.len ..];
-    if a.len == 0 || b.len == 0 { return "", "", false; }
-    for c in a {
-        if c == '/' { return "", "", false; }
-    }
-    for c in b {
-        if c == '/' { return "", "", false; }
-    }
-    return a, b, true;
-}
-
-// --- wildcard tail: app.get_wild("/files/*") { path => ... } ---
 
 inline fn get_wild<F>(app: Ctx&, route: const u8[:]) {
-    if route.len == 0 || route[route.len - 1] != '*' { return; }
-    let prefix = route[..route.len - 1];
-    let rest, ok = app.rest(prefix);
+    if app.handled { return; }
+    let ok = match_route(app, route);
     if ok { app.path_matched = true; }
-    if !app.handled && (app.method == "GET" || app.head_only) && ok {
-        F(rest);
+    if (app.method == "GET" || app.head_only) && ok {
+        F(app.tail);
         app.handled = true;
     }
 }
 
-// --- wildcard tail for PATCH: app.patch_wild("/api/todos/") { rest => ... } ---
-
 inline fn patch_wild<F>(app: Ctx&, prefix: const u8[:]) {
+    if app.handled { return; }
     let rest, ok = app.rest(prefix);
     if ok { app.path_matched = true; }
-    if !app.handled && app.method == "PATCH" && ok {
+    if app.method == "PATCH" && ok {
+        app.tail = rest;
         F(rest);
         app.handled = true;
     }
@@ -331,7 +394,7 @@ inline fn ok_json(app: Ctx&) {
     app.json_raw(200, "{\"ok\":true}");
 }
 
-// --- streaming JSON writer over ctx.res (zero-copy, auto commas/braces) ---
+// --- streaming JSON writer over ctx.res (zero-copy, overloaded j.set) ---
 
 struct JWriter { out: u8[>..]&, first: bool }
 
@@ -347,6 +410,13 @@ inline fn int(j: JWriter&, key: const u8[:], val: i64) {
     j.first = false;
     json::format_key(j.out, key);
     json::format_int(j.out, val);
+}
+
+inline fn num(j: JWriter&, key: const u8[:], val: f64) {
+    if !j.first { j.out.push(','); }
+    j.first = false;
+    json::format_key(j.out, key);
+    json::format_number(j.out, val);
 }
 
 inline fn jbool(j: JWriter&, key: const u8[:], val: bool) {
@@ -370,13 +440,18 @@ inline fn raw(j: JWriter&, key: const u8[:], fragment: const u8[:]) {
     j.out.append(fragment);
 }
 
+// Type-overloaded `j.set(key, val)` for str / i64 / f64 / bool.
+inline fn set(j: JWriter&, key: const u8[:], val: const u8[:]) { j.str(key, val); }
+inline fn set(j: JWriter&, key: const u8[:], val: i64) { j.int(key, val); }
+inline fn set(j: JWriter&, key: const u8[:], val: f64) { j.num(key, val); }
+inline fn set(j: JWriter&, key: const u8[:], val: bool) { j.jbool(key, val); }
+
 inline fn json_run<F>(w: JWriter&) {
     w.out.push('{');
     F(w);
     w.out.push('}');
 }
 
-// app.json() { j => j.str("message", "Hello, World!"); } -> 200 + JSON.
 inline fn json<F>(app: Ctx&) {
     var w = JWriter { out: app.res, first: true };
     let start = app.res.len;
@@ -384,7 +459,6 @@ inline fn json<F>(app: Ctx&) {
     app.json_raw(200, app.res[start..]);
 }
 
-// 201 Created variant of json().
 inline fn created_json<F>(app: Ctx&) {
     var w = JWriter { out: app.res, first: true };
     let start = app.res.len;
@@ -425,7 +499,6 @@ inline fn body_bool(app: Ctx&, key: const u8[:]) -> bool, bool {
     return json::as_bool(json::member(root, key));
 }
 
-// Required non-empty string field: runs F(val), else 400 {"error":...}.
 inline fn require_str<F>(app: Ctx&, key: const u8[:]) {
     let v, ok = app.body_str(key);
     if !ok || v.len == 0 {

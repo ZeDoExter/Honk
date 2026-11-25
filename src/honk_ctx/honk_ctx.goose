@@ -34,9 +34,11 @@ struct Ctx {
     tmp: u8[>..]&,
     dom: json::Node[>..]&,
     dstr: u8[>..]&,
-    // Route params (e.g. /users/:id -> params[0]; /orgs/:org/repos/:repo -> [0],[1]).
+    // Route params (e.g. /users/:id -> params[0] / param("id"); /* -> tail).
     params: const u8[:][4],
+    param_names: const u8[:][4],
     n_params: i64,
+    tail: const u8[:],
     // Middleware decoration (set by auth guard).
     user: const u8[:],
     authed: bool,
@@ -86,6 +88,7 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
         tmp: tmp,
         dom: dom,
         dstr: dstr,
+        tail: "",
         user: "",
         authed: false,
         status: 200,
@@ -180,6 +183,19 @@ fn query(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
 // Route parameter by index; "" when out of range.
 inline fn param_str(c: Ctx&, i: i64) -> const u8[:] {
     if i >= 0 && i < 4 && i < c.n_params { return c.params[i]; }
+    return "";
+}
+
+// Overloaded `app.param(0)` and `app.param("id")` lookups (zero-copy views).
+inline fn param(c: Ctx&, i: i64) -> const u8[:] {
+    return c.param_str(i);
+}
+
+inline fn param(c: Ctx&, name: const u8[:]) -> const u8[:] {
+    let n = if c.n_params <= 4 { c.n_params } else { 4 };
+    for i in n {
+        if c.param_names[i] == name { return c.params[i]; }
+    }
     return "";
 }
 

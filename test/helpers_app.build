@@ -1,2 +1,0 @@
-c_sources = ["../src/shim/honk_shim.c", "../src/shim/picohttpparser.c"];
-c_include = ["../src/shim"];

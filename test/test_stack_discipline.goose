@@ -7,7 +7,7 @@
 
 import std;
 import os;
-import honk from "../src";
+import honk from "..";
 
 extern fn test_helper_init(port: i32) -> i32;
 extern fn test_helper_cleanup();

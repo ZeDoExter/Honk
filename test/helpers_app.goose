@@ -5,7 +5,7 @@
 import std;
 import os;
 import json;
-import honk from "../src";
+import honk from "..";
 
 thread_fn worker(port: i32) {
     honk::listen_or_abort(port);
