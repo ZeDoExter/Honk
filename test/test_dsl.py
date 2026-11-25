@@ -172,6 +172,13 @@ def test_jwriter_and_body_helpers(port):
 
     code, _, _ = req(port, "GET", "/v1/sec/who")
     assert code == 401
+
+    # Socket peer client_ip() + TCP rate_limit_key (exercises tls_rl_table + shutdown free under LSan)
+    assert req(port, "GET", "/v1/my-ip")[0:3:2] == (200, b"127.0.0.1")
+    assert req(port, "GET", "/v1/rl-tcp")[0] == 200
+    assert req(port, "GET", "/v1/rl-tcp")[0] == 200
+    code, hdrs, body = req(port, "GET", "/v1/rl-tcp")
+    assert code == 429 and b"retry-after" in hdrs and body == b"Too Many Requests"
     print("  [PASS] test_jwriter_and_body_helpers")
 
 

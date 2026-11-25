@@ -98,6 +98,16 @@ def test_static_exact(port, root):
     assert code == 200 and hdrs[b"content-type"] == b"application/octet-stream", (code, hdrs)
     assert len(body) == 2 * 1024 * 1024, len(body)
     s.close()
+    # ETag + conditional If-None-Match -> 304 Not Modified (zero body).
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, hdrs, _ = read_response(f)
+    s.close()
+    etag = hdrs.get(b"etag", b"")
+    assert code == 200 and etag.startswith(b'W/"'), hdrs
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nIf-None-Match: " + etag + b"\r\nConnection: close\r\n\r\n")
+    code, hdrs304, _ = read_response(f, skip_body=True)
+    assert code == 304 and hdrs304.get(b"etag") == etag and f.read() == b"", (code, hdrs304)
+    s.close()
     print("  [PASS] test_static_exact")
 
 

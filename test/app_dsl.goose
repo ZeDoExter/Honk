@@ -120,6 +120,15 @@ fn dsl_routes(app: honk::Ctx&) {
                 app.get("/who") { app.ok(tok); };
             };
         };
+        app.get("/my-ip") {
+            app.ok(app.client_ip());
+        };
+        app.get("/rl-tcp") {
+            app.rate_limit_key("tcp-k", 2, 60);
+            if !app.handled {
+                app.ok("allowed");
+            }
+        };
     };
 
     // 128 KiB response with shrunk SO_SNDBUF (16 KiB) for SIGTERM drain test.
