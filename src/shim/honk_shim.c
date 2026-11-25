@@ -81,7 +81,7 @@ typedef struct {
     uint8_t active;
     uint8_t close_after_tx;
     uint16_t _pad;
-    uint32_t peer_ip;
+    char peer_ip_str[46];   /* "127.0.0.1", "::1", "2001:db8::1", or "unix"; "" = unknown */
     uint32_t epoll_events;
     uint8_t *partial_rx;
     size_t partial_rx_len;
@@ -519,7 +519,7 @@ int32_t honk_wait(int32_t *out_fds, uint8_t *out_date29, int32_t timeout_ms) {
 
         if (fd == tls_listen_fd) {
             for (;;) {
-                struct sockaddr_in caddr;
+                struct sockaddr_storage caddr;
                 socklen_t clen = sizeof(caddr);
                 int cfd = accept4(tls_listen_fd, (struct sockaddr *)&caddr, &clen, SOCK_NONBLOCK);
                 if (cfd < 0) break;
@@ -538,7 +538,24 @@ int32_t honk_wait(int32_t *out_fds, uint8_t *out_date29, int32_t timeout_ms) {
                 c->fd = cfd;
                 c->active = 1;
                 c->close_after_tx = 0;
-                c->peer_ip = ntohl(caddr.sin_addr.s_addr);
+                c->peer_ip_str[0] = '\0';
+                if (caddr.ss_family == AF_INET) {
+                    struct sockaddr_in *a4 = (struct sockaddr_in *)&caddr;
+                    inet_ntop(AF_INET, &a4->sin_addr, c->peer_ip_str, sizeof(c->peer_ip_str));
+                } else if (caddr.ss_family == AF_INET6) {
+                    struct sockaddr_in6 *a6 = (struct sockaddr_in6 *)&caddr;
+                    if (IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr)) {
+                        /* Backward compat: plain dotted IPv4, never ::ffff:a.b.c.d. */
+                        inet_ntop(AF_INET, a6->sin6_addr.s6_addr + 12,
+                                  c->peer_ip_str, sizeof(c->peer_ip_str));
+                    } else {
+                        inet_ntop(AF_INET6, &a6->sin6_addr,
+                                  c->peer_ip_str, sizeof(c->peer_ip_str));
+                    }
+                }
+                else if (caddr.ss_family == AF_UNIX) {
+                    memcpy(c->peer_ip_str, "unix", 5);
+                }
                 c->epoll_events = EPOLLIN | EPOLLRDHUP;
                 c->partial_rx = NULL;
                 c->partial_rx_len = 0;
@@ -1075,17 +1092,16 @@ int64_t honk_file_mtime(int32_t file_fd) {
     return (int64_t)st.st_mtime;
 }
 
-/* Append IPv4 `a.b.c.d` for `fd` (defaults to 127.0.0.1 for in-memory tests). */
+/* Append the stored peer IP string (`"127.0.0.1"`, `"::1"`, `"2001:db8::1"`,
+ * or `"unix"`; defaults to 127.0.0.1 for in-memory tests). */
 int64_t honk_conn_ip(int32_t fd, gs_rref out) {
-    uint32_t ip = 0x7f000001U;
-    if (fd >= 0 && fd < HONK_MAX_FD && tls_conns && tls_conns[fd].active && tls_conns[fd].peer_ip != 0) {
-        ip = tls_conns[fd].peer_ip;
+    const char *ip = "127.0.0.1";
+    if (fd >= 0 && fd < HONK_MAX_FD && tls_conns && tls_conns[fd].active &&
+        tls_conns[fd].peer_ip_str[0] != '\0') {
+        ip = tls_conns[fd].peer_ip_str;
     }
-    char buf[24];
-    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
-                     (ip >> 24) & 0xffU, (ip >> 16) & 0xffU,
-                     (ip >> 8) & 0xffU, ip & 0xffU);
-    if (n > 0) honk_rref_append(out, buf, (int64_t)n);
+    size_t n = strlen(ip);
+    if (n > 0) honk_rref_append(out, ip, (int64_t)n);
     return (int64_t)n;
 }
 
