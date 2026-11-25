@@ -849,6 +849,33 @@ inline fn require_bool<F>(app: Ctx&, key: const u8[:]) {
         F(v);
     }
 }
+inline fn body_f64(app: Ctx&, key: const u8[:]) -> f64, bool {
+    let root, ok = body_root(app);
+    if !ok { return 0.0, false; }
+    return json::as_f64(json::member(root, key));
+}
+
+// Required float field -> `F(val)`, else `400 {"error":"invalid or missing field: <key>"}`.
+inline fn require_float<F>(app: Ctx&, key: const u8[:]) {
+    let v, ok = app.body_f64(key);
+    if !ok {
+        field_error(app, "invalid or missing field: ", key);
+    } else {
+        F(v);
+    }
+}
+
+// Required float field clamped to `min_v..=max_v`.
+inline fn require_float_range<F>(app: Ctx&, key: const u8[:], min_v: f64, max_v: f64) {
+    let v, ok = app.body_f64(key);
+    if !ok {
+        field_error(app, "invalid or missing field: ", key);
+    } else if v < min_v || v > max_v {
+        field_error(app, "out of range: ", key);
+    } else {
+        F(v);
+    }
+}
 
 // Required non-empty form field (`urlencoded` or `multipart`) -> `F(val)`, else `400`.
 inline fn require_form<F>(app: Ctx&, key: const u8[:]) {
