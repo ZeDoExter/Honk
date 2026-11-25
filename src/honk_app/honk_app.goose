@@ -218,13 +218,28 @@ inline fn split_2param(route: const u8[:]) -> const u8[:], const u8[:], bool {
     var i: i64 = 0;
     while i + 1 < route.len {
         if route[i] == '/' && route[i + 1] == ':' {
-            if first < 0 {
-                first = i;
-            } else {
-                return route[..first + 1], route[first + 1 .. i + 1], true;
-            }
+            first = i;
+            break;
         }
         i++;
+    }
+    if first < 0 { return "", "", false; }
+    var mid_start = -1;
+    var j = first + 2;
+    while j < route.len {
+        if route[j] == '/' {
+            mid_start = j;
+            break;
+        }
+        j++;
+    }
+    if mid_start <= first + 2 { return "", "", false; }
+    var k = mid_start;
+    while k + 1 < route.len {
+        if route[k] == '/' && route[k + 1] == ':' {
+            return route[..first + 1], route[mid_start .. k + 1], true;
+        }
+        k++;
     }
     return "", "", false;
 }
