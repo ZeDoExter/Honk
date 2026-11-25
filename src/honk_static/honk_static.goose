@@ -25,6 +25,14 @@ inline fn static_dir_cached(app: honk::Ctx&, prefix: const u8[:], root: const u8
     if app.method != "GET" && !app.head_only { return; }
     if serve_rel_cached(app, root, rest, true, cache_ctl) { app.handled = true; }
 }
+// Serve one exact file with optional `Cache-Control` (non-breaking companion
+// to `static_dir` / `static_dir_cached`; `rel` is relative to `root`).
+inline fn static_file(app: honk::Ctx&, route: const u8[:], root: const u8[:], rel: const u8[:], cache_ctl: const u8[:] = "") {
+    if app.handled { return; }
+    if app.path == route { app.path_matched = true; }
+    if (app.method != "GET" && !app.head_only) || app.path != route { return; }
+    if serve_rel_cached(app, root, rel, false, cache_ctl) { app.handled = true; }
+}
 
 // Serve compile-time `embed_file(...)` bytes at `route` with deterministic
 // FNV-1a `ETag` + `304 Not Modified` support (ships SPAs inside one binary).
