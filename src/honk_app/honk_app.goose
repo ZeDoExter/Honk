@@ -249,8 +249,8 @@ fn match_route_dyn(app: Ctx&, pat: const u8[:]) -> bool {
     if pat.len == 0 || pat[0] != '/' || path.len == 0 || path[0] != '/' {
         return false;
     }
-    var pvals: const u8[:][4] = [path[..0]; 4];
-    var pnames: const u8[:][4] = [pat[..0]; 4];
+    var pvals: const u8[:][8] = [path[..0]; 8];
+    var pnames: const u8[:][8] = [pat[..0]; 8];
     var np: i64 = 0;
 
     var pi: i64 = 1;
@@ -267,7 +267,7 @@ fn match_route_dyn(app: Ctx&, pat: const u8[:]) -> bool {
         if pseg == "*" && pend == pat.len {
             if xi >= path.len { return false; }
             let rem = path[xi..];
-            if np < 4 {
+            if np < 8 {
                 pvals[np] = rem;
                 pnames[np] = pseg;
                 np++;
@@ -292,7 +292,7 @@ fn match_route_dyn(app: Ctx&, pat: const u8[:]) -> bool {
 
         if pseg.len > 1 && pseg[0] == ':' {
             if xseg.len == 0 { return false; }
-            if np < 4 {
+            if np < 8 {
                 pvals[np] = xseg;
                 pnames[np] = pseg[1..];
                 np++;

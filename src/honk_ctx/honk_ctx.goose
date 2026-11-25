@@ -36,8 +36,8 @@ struct Ctx {
     dom: json::Node[>..]&,
     dstr: u8[>..]&,
     // Route params (e.g. /users/:id -> params[0] / param("id"); /* -> tail).
-    params: const u8[:][4],
-    param_names: const u8[:][4],
+    params: const u8[:][8],
+    param_names: const u8[:][8],
     n_params: i64,
     tail: const u8[:],
     // Middleware decoration (set by auth guard).
@@ -192,7 +192,7 @@ fn query(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
 
 // Route parameter by index; "" when out of range.
 inline fn param_str(c: Ctx&, i: i64) -> const u8[:] {
-    if i >= 0 && i < 4 && i < c.n_params { return c.params[i]; }
+    if i >= 0 && i < 8 && i < c.n_params { return c.params[i]; }
     return "";
 }
 
@@ -202,7 +202,7 @@ inline fn param(c: Ctx&, i: i64) -> const u8[:] {
 }
 
 inline fn param(c: Ctx&, name: const u8[:]) -> const u8[:] {
-    let n = if c.n_params <= 4 { c.n_params } else { 4 };
+    let n = if c.n_params <= 8 { c.n_params } else { 8 };
     for i in n {
         if c.param_names[i] == name { return c.params[i]; }
     }
@@ -240,7 +240,7 @@ fn parse_i64_strict(s: const u8[:]) -> i64, bool {
 
 // Route parameter parsed as i64; false when missing, non-numeric, or overflowing.
 inline fn param_int(c: Ctx&, i: i64) -> i64, bool {
-    if i < 0 || i >= 4 || i >= c.n_params { return 0, false; }
+    if i < 0 || i >= 8 || i >= c.n_params { return 0, false; }
     return parse_i64_strict(c.params[i]);
 }
 
@@ -307,13 +307,13 @@ inline fn query_decoded(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
 
 // Decoded route parameter (+ stays literal); false when absent or malformed.
 inline fn param_decoded(c: Ctx&, i: i64) -> const u8[:], bool {
-    if i < 0 || i >= 4 || i >= c.n_params { return "", false; }
+    if i < 0 || i >= 8 || i >= c.n_params { return "", false; }
     return url_decode(c, c.params[i], false);
 }
 
 // Decoded named route parameter (e.g. app.param_dec("name")).
 inline fn param_dec(c: Ctx&, name: const u8[:]) -> const u8[:], bool {
-    let n = if c.n_params <= 4 { c.n_params } else { 4 };
+    let n = if c.n_params <= 8 { c.n_params } else { 8 };
     for i in n {
         if c.param_names[i] == name {
             return url_decode(c, c.params[i], false);
