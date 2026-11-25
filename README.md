@@ -1,21 +1,21 @@
 # Honk — a zero-copy HTTP framework in Goose
 
 Honk is an HTTP/1.1 backend framework written in [Goose](https://github.com/aardappel/goose)
-(ahead-of-time compiled to C) for Linux `epoll` servers: a **4-line Hello World**,
+(ahead-of-time compiled to C) for Linux `epoll` servers: a **4-line single-file Hello World**,
 **~2 MB flat RSS**, a **~150 KiB zero-dependency binary**, and zero per-request
 heap allocations — at `89%` of hand-written C speed.
 
 ```sh
 git clone https://github.com/ZeDoExter/Honk.git && cd Honk
 ./honk doctor                              # checks gcc + pinned Goose + wrk
-./honk new my-api && ./honk dev my-api     # scaffold + auto-reload dev server
+./honk new my-api && ./honk dev my-api     # scaffold single main.goose + auto-reload
 curl http://127.0.0.1:18080/               # Hello from my-api!
 ```
 
-A complete Hello World is **4 lines of Goose**:
+A complete Hello World is **4 lines of Goose** (no `.build` file needed):
 
 ```goose
-import honk from "./src";
+import honk from "ZeDoExter/Honk@v0.3.0";
 fn main() {
     honk::listen(18080) { app => app.get("/", "Hello, World!"); };
 }
@@ -25,13 +25,13 @@ Static routes, `:params`, `*` wildcards, and streaming JSON in **9 lines** —
 with automatic `404` / `405` handling and zero closure allocations:
 
 ```goose
-import honk from "./src";
+import honk from "ZeDoExter/Honk@v0.3.0";
 fn main() {
     honk::listen(18080) { app =>
         app.get("/health", "ok");
-        app.get_param("/users/:name") { name => app.ok(name); };
-        app.get_wild("/files/*") { path => app.ok(path); };
-        app.get("/json") { app.json() { j => j.str("message", "Hello, World!"); }; };
+        app.get("/users/:name") { app.ok(app.param("name")); };
+        app.get("/files/*") { app.ok(app.tail); };
+        app.get("/json") { app.json() { j => j.set("message", "Hello, World!"); }; };
     };
 }
 ```
@@ -50,8 +50,9 @@ How it gets there:
   the request buffer — parsed in place with `picohttpparser`, never copied.
 - **Scoped builders**: per-request builders live in an explicit inner scope and reset
   on every pipelined request (verified in generated C).
-- **Dispatch-as-code**: `honk::listen`, `app.get*`, and `app.json` are `inline fn`s that
-  monomorphize straight into the worker loop — no function-pointer tables, no per-request closures.
+- **Dispatch-as-code**: `honk::listen`, `app.get/post/...`, and `app.json` are `inline fn`s
+  that monomorphize straight into the worker loop — static route patterns fold at
+  compile time, with no function-pointer tables and no per-request closures.
 
 ## Documentation index
 
@@ -60,17 +61,18 @@ How it gets there:
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 5-minute tutorial + Goose cheat sheet |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Recipes: routing, JSON, auth, CORS, cookies, static, SQLite, deploy |
 | [`docs/API.md`](docs/API.md) | Every public function, one table per module |
-| [`examples/quickstart/`](examples/quickstart/) | Commented App DSL example (`:params`, bearer auth, validated JSON POST) |
-| [`examples/fullstack_todo/`](examples/fullstack_todo/) | Single-binary Todo app (`sendfile` UI + SQLite API) |
+| [`examples/quickstart/`](examples/quickstart/) | Commented single-file API (`:params`, bearer auth, validated JSON POST) |
+| [`examples/fullstack_todo/`](examples/fullstack_todo/) | ~45-line single-file Todo app (`sendfile` UI + SQLite API) |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architecture decision record (D-001…) |
 | [`docs/history/`](docs/history/) | Development log: transport → framework → shootout → DX → v0.1.0 |
 
 ## Build, test, deploy
 
 ```sh
-./honk test                              # everything: 900k turns + suites + ASan
-./honk build my-api --release            # -> my-api/dist/main, zero dependencies
-./my-api/dist/main 8080                  # single worker (SIGINT/SIGTERM drains cleanly)
+./honk test                                # everything: 900k turns + suites + ASan
+./honk new my-api --git                    # standalone repo pinned to ZeDoExter/Honk@v0.3.0
+./honk build my-api --release              # -> my-api/dist/main, zero dependencies
+./my-api/dist/main 8080                    # single worker (SIGINT/SIGTERM drains cleanly)
 HONK_WORKERS=auto ./my-api/dist/main 8080  # scale across all available CPU cores
 ```
 
@@ -82,9 +84,9 @@ docker build -t honk:quickstart . && docker run --rm -p 18080:18080 honk:quickst
 ### Manual commands (what `./honk` wraps)
 
 ```sh
-# Framework demo server (all routes + cross-framework bench mode via argv[5]=1):
-./goose_repo/build-linux/goose build src/server.goose -o /tmp/honk
-/tmp/honk 18080 30000 10000 1              # port, idle_ms, header_ms, workers
+# Any app imports honk.goose + honk.build directly — no per-app .build file needed:
+./goose_repo/build-linux/goose build examples/quickstart/app.goose -o /tmp/app
+/tmp/app 18080
 
 # Regression (WSL2/Linux): 900k stack-discipline turns + correctness suites
 ./test/test_stack_discipline
@@ -92,13 +94,10 @@ python3 test/test_transport.py ./src/server_minimal
 python3 test/test_framework.py ./src/server 18210 Release
 
 # Hardened build (ASan + UBSan + LSan; must exit 0 with zero findings):
-./goose_repo/build-linux/goose -o /tmp/honk.c --standalone src/server.goose
-gcc -O2 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
-  -Isrc/shim -Igoose_repo/src/runtime /tmp/honk.c \
-  src/shim/honk_shim.c src/shim/picohttpparser.c -o /tmp/honk_asan -lm -pthread -ldl
+./honk build examples/quickstart --asan
 ```
 
-**Deploy**: ship the Release binary as-is — it links only libc/pthreads (`0.17 MiB`,
+**Deploy**: ship the Release binary as-is — it links only libc/pthreads (`0.15 MiB`,
 no runtime, no `node_modules`, no venv). Terminate TLS in a reverse proxy (nginx,
 Caddy); Honk speaks plain HTTP/1.1 with keep-alive + pipelining.
 
@@ -150,17 +149,20 @@ no pre-serialized literals, no strawman configs.
 
 ## Capabilities & roadmap
 
-**Today**: `./honk` CLI (`setup`/`doctor`/`new`/`dev`/`build`/`test`), single-import
-`honk` barrel, one-call `honk::listen` + declarative route API (`get`/`post`/`put`/`patch`/`delete`,
-`:params`, typed `get_int`/`patch_int`/`delete_int`, 2-param `get2`, `*` wildcards,
-automatic `404`/`405` tracking), streaming `app.json` writer + `body_*`/`require_str`
-extractors, query + percent-decoding, headers, composable guards, CORS, cookies,
-bearer auth, `HEAD`, kernel-`sendfile` static serving (`static_dir`), opt-in SQLite
-(WAL, one-line `sql_json`/`sql_json_one`/`insert_text`/`run_int` + low-level `Stmt`),
-strict `400`/`404`/`405` + `413`/`431`/`501` caps, idle + slowloris timeouts,
+**Today**: `./honk` CLI (`setup`/`doctor`/`new [--git]`/`dev`/`build`/`test`),
+zero-sidecar `honk` package (`import honk from "ZeDoExter/Honk@v0.3.0";`),
+one-call `honk::listen` + unified pattern routing (`get`/`post`/`put`/`patch`/`delete`
+supporting static paths, named `app.param("id")` + suffixes like `/todos/:id/toggle`,
+`/*` `app.tail`, typed `*_int` routes, and automatic `404`/`405` tracking),
+streaming `app.json` writer (`j.set` overloaded for `str`/`i64`/`f64`/`bool`) +
+`body_*`/`require_str` extractors, query + percent-decoding, headers, composable
+guards, CORS, cookies, bearer auth, `HEAD`, kernel-`sendfile` static serving
+(`static_dir`), opt-in `sqlite/` package (`db_connect`, `BOOLEAN`-aware `sql_json`
+streaming, `insert_text`/`run_int` + low-level `Stmt`), strict
+`400`/`404`/`405` + `413`/`431`/`501` caps, idle + slowloris timeouts,
 `SIGINT`/`SIGTERM` graceful outbound drain, zero-code `$HONK_WORKERS` /
-`honk::listen_workers` `SO_REUSEPORT` multi-core scaling (plus `thread_fn` CPU
-pinning), Linux `epoll`, Docker + GitHub Actions CI.
+`honk::listen_workers` `SO_REUSEPORT` multi-core scaling, Linux `epoll`,
+Docker + GitHub Actions CI.
 
 **Not yet**: TLS (terminate at a reverse proxy), HTTP/2+, chunked request bodies
 (`501`), WebSockets. See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the

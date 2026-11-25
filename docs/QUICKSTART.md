@@ -15,10 +15,12 @@ need **five** Goose ideas (cheat sheet below) to ship a Honk API.
 ## 1. Scaffold and run
 
 ```sh
-./honk new my-api && ./honk dev my-api
+./honk new my-api && ./honk dev my-api        # portable relative import (works offline)
+# or: ./honk new my-api --git                 # pinned to "ZeDoExter/Honk@v0.3.0"
 ```
 
-Open another terminal:
+Notice only **one file** is created (`my-api/main.goose`) — Honk packages its own C
+shim via `honk.build`, so your app needs no `.build` file. Open another terminal:
 
 ```sh
 curl http://127.0.0.1:18080/
@@ -27,8 +29,8 @@ curl -X POST http://127.0.0.1:18080/users \
   -H "Content-Type: application/json" -d '{"name":"ada","age":36}'
 ```
 
-Edit `my-api/main.goose`, save — the dev server rebuilds and restarts by itself
-(like `bun --watch`). `Ctrl-C` stops it.
+Edit `my-api/main.goose`, save — the dev server rebuilds and restarts automatically.
+`Ctrl-C` stops and drains it cleanly.
 
 ## 2. Ship it
 
@@ -47,39 +49,38 @@ You will only meet these five constructs in Honk apps:
 
 | You know (JS / Go / Python) | Goose in Honk | Example |
 |---|---|---|
-| `string` slice / `&str` / `str` | `const u8[:]` — a **view** (pointer + length), never copied | `app.path`, `app.body` |
-| `struct` / `struct` / `dataclass` | `struct` with fields; `Config { port: 8080, .. }` fills the rest with defaults | `honk::Config { port: 8080, .. }` |
+| `string` slice / `&str` / `str` | `const u8[:]` — a **view** (pointer + length), never copied | `app.path`, `app.param("id")` |
+| `struct` / `struct` / `dataclass` | `struct` with fields; `Config { port: 8080, .. }` fills defaults | `honk::Config { port: 8080, .. }` |
 | `val, err := …` / destructuring | `let val, ok = …` — multiple return values, no exceptions | `let age, ok = app.body_int("age");` |
 | `Buffer` / `bytes.Buffer` / `bytearray` | `u8[>..]&` — a growable builder (`out.append(x)`, `out.push(c)`); auto-freed at scope exit | `app.res.append("hi")` |
 | arrow fn / closure / `def` | trailing block `{ arg => … }` — inlined at compile time (**never `return`/`break` inside; use if/else**) | `honk::listen(18080) { app => … };` |
 
 Everything else is plain `if`/`else`, `for x in n`, `while`, `==`, `+` — exactly
-like you expect. Types you will see: `i64` (int), `u8` (byte), `bool`,
-`const u8[:]` (read-only view). A trailing `&` (`honk::Ctx&`) means "by reference".
+like you expect. Types you will see: `i64` (int), `f64` (float), `u8` (byte),
+`bool`, `const u8[:]` (read-only view). A trailing `&` (`honk::Ctx&`) means "by reference".
 
 ## 4. From 4 lines to a JSON API
 
-A minimal server is 4 lines (`./honk new` writes the `import honk from ".../src";`
-path and `.build` file for you):
+A minimal server is 4 lines in a single `.goose` file:
 
 ```goose
-import honk from "/path/to/Honk/src";
+import honk from "ZeDoExter/Honk@v0.3.0";
 fn main() {
     honk::listen(18080) { app => app.get("/", "Hello, World!"); };
 }
 ```
 
-Add `:params`, `*` wildcards, streaming JSON, and validated `POST` bodies without
-touching threads, buffers, or manual JSON escaping:
+Add `:params`, `*` wildcards, overloaded `j.set` JSON streaming, and validated
+`POST` bodies with zero boilerplate:
 
 ```goose
-import honk from "/path/to/Honk/src";
+import honk from "ZeDoExter/Honk@v0.3.0";
 
 fn main() {
-    honk::listen(18080) { app =>
+    honk::listen(honk::arg_port(18080)) { app =>
         app.get("/", "Hello, World!");
-        app.get_param("/users/:id") { id =>
-            app.json() { j => j.str("id", id); };
+        app.get("/users/:id") {
+            app.json() { j => j.set("id", app.param("id")); };
         };
         app.post("/users") {
             app.require_str("name") { name =>
@@ -88,8 +89,9 @@ fn main() {
                     app.json_error(400, "age (int) required");
                 } else {
                     app.created_json() { j =>
-                        j.str("name", name);
-                        j.int("age", age);
+                        j.set("created", true);
+                        j.set("name", name);
+                        j.set("age", age);
                     };
                 }
             };
