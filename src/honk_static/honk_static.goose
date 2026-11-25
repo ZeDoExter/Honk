@@ -3,15 +3,32 @@
 // try_serve_file validates + opens root/rel, stages response headers, and
 // hands the open fd to the turn, which send()s headers first and then pushes
 // file bytes via honk_sendfile_data (EAGAIN tails resume on EPOLLOUT).
-// File bytes never pass through Goose buffers. At most one file per turn;
-// pipelined tails resume next EPOLLIN via the normal partial_rx stash.
+// File bytes never pass through Goose buffers.
 //
 // Security: NUL/backslash/malformed-% rejected; decoded segments checked
-// (.. rejected, . and empties skipped); open uses O_NOFOLLOW + fstat S_ISREG
-// (symlinks/dirs/FIFOs/devices never served). Non-GET/HEAD stages 405.
-
+// (.. rejected, . and empties skipped); open uses O_NOFOLLOW + O_NONBLOCK +
+// fstat S_ISREG (symlinks/dirs/FIFOs/devices never served). Non-GET/HEAD
+// stages 405. static_dir() mounts a directory in App route DSL style.
 import std;
-import honk_ctx;
+import honk_ctx.honk_ctx;
+
+// App-level directory mount: GET/HEAD under prefix served from root.
+// Marks path_matched for 405 tracking; first-match-wins via app.handled.
+inline fn static_dir(app: honk::Ctx&, prefix: const u8[:], root: const u8[:]) {
+    if app.handled { return; }
+    if prefix == "/" {
+        if app.path.len == 0 || app.path[0] != '/' { return; }
+        app.path_matched = true;
+        if app.method != "GET" && !app.head_only { return; }
+        if serve_rel(app, root, app.path[1..], true) { app.handled = true; }
+        return;
+    }
+    let rest, ok = app.rest(prefix);
+    if !ok { return; }
+    app.path_matched = true;
+    if app.method != "GET" && !app.head_only { return; }
+    if serve_rel(app, root, rest, true) { app.handled = true; }
+}
 
 extern fn honk_file_open(root: const u8[:], rel: const u8[:]) -> i32;
 extern fn honk_file_size(file_fd: i32) -> i64;
@@ -20,7 +37,7 @@ extern fn honk_file_close(file_fd: i32);
 inline fn ext_eq(a: const u8[:], b: const u8[:]) -> bool {
     if a.len != b.len { return false; }
     for k in a.len {
-        if !eq_ci(a[k], b[k]) { return false; }
+        if !honk::eq_ci(a[k], b[k]) { return false; }
     }
     return true;
 }
@@ -61,7 +78,7 @@ fn mime_for_rel(rel: const u8[:]) -> const u8[:] {
 //   - Other methods: stages 405, returns true.
 //   - Directory/empty remainder: tries index.html when with_index.
 // Root should be a static literal (borrowed, never copied).
-fn try_serve_file(c: Ctx&, root: const u8[:], with_index: bool) -> bool {
+fn try_serve_file(c: honk::Ctx&, root: const u8[:], with_index: bool) -> bool {
     if c.method != "GET" && !c.head_only {
         c.text(405, "Method Not Allowed");
         return true;
@@ -74,13 +91,13 @@ fn try_serve_file(c: Ctx&, root: const u8[:], with_index: bool) -> bool {
 
 // Serve an explicit relative path (no leading slash). Same validation and
 // staging as try_serve_file; used for SPA index.html fallback and tests.
-fn serve_rel(c: Ctx&, root: const u8[:], raw: const u8[:], with_index: bool) -> bool {
+fn serve_rel(c: honk::Ctx&, root: const u8[:], raw: const u8[:], with_index: bool) -> bool {
     if root.len == 0 { return false; }
     for ch in raw {
         if ch == 0 || ch == '\\' { return false; }
     }
     // Decode %XX (+ stays literal in paths) and normalize segments.
-    let dec, ok = url_decode(c, raw, false);
+    let dec, ok = honk::url_decode(c, raw, false);
     if !ok { return false; }
     for ch in dec {
         if ch == 0 { return false; }

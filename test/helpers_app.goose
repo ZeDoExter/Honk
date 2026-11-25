@@ -5,9 +5,7 @@
 import std;
 import os;
 import json;
-import honk_net from "../src/honk_net";
-import honk_ctx from "../src/honk_ctx";
-import honk_serve from "../src/honk_serve";
+import honk from "../src";
 
 thread_fn worker(port: i32) {
     honk::listen_or_abort(port);
@@ -16,13 +14,13 @@ thread_fn worker(port: i32) {
             if ctx.method == "OPTIONS" {
                 ctx.cors_preflight();
             } else if ctx.method == "GET" {
-                let ps, pok = match_1param(ctx.path, "/p/str/");
+                let ps, pok = honk::match_1param(ctx.path, "/p/str/");
                 if pok {
                     ctx.params[0] = ps;
                     ctx.n_params = 1;
                     ctx.text(200, ctx.param_str(0));
                 } else {
-                    let pi, piok = match_1param(ctx.path, "/p/int/");
+                    let pi, piok = honk::match_1param(ctx.path, "/p/int/");
                     if piok {
                         ctx.params[0] = pi;
                         ctx.n_params = 1;
@@ -52,7 +50,7 @@ thread_fn worker(port: i32) {
                             ctx.text(400, "Bad Request");
                         }
                     } else {
-                        let pd, pdok = match_1param(ctx.path, "/p/dec/");
+                        let pd, pdok = honk::match_1param(ctx.path, "/p/dec/");
                         if pdok {
                             ctx.params[0] = pd;
                             ctx.n_params = 1;
@@ -102,7 +100,7 @@ thread_fn worker(port: i32) {
                         } else {
                             let rest, rok = ctx.rest("/files/");
                             if rok {
-                                if rest.has_dotdot() {
+                                if honk::has_dotdot(rest) {
                                     ctx.text(400, "Bad Request");
                                 } else {
                                     ctx.text(200, rest);

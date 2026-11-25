@@ -5,11 +5,13 @@
 // closures; handlers take only `ctx` (buffers ride inside it) and stage
 // responses; the turn runner (`honk_serve`) emits centrally.
 
+namespace honk;
+
 import std;
 import json;
-import honk_net;
-import honk_ctx;
-import honk_json;
+import honk_net.honk_net;
+import honk_ctx.honk_ctx;
+import honk_json.honk_json;
 
 // Cross-framework bench mode (worker-TLS global, set from argv):
 // workload-exact routes on standard paths (/json -> {"message":...},

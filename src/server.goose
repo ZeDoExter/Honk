@@ -6,11 +6,9 @@
 
 import std;
 import os;
-import honk_net from "./honk_net";
-import honk_ctx from "./honk_ctx";
-import honk_json from "./honk_json";
-import honk_router from "./honk_router";
-import honk_serve from "./honk_serve";
+import honk from ".";
+import honk.honk_json.honk_json;
+import honk.honk_router.honk_router;
 
 struct WorkerCfg {
     port: i32,
@@ -22,7 +20,7 @@ struct WorkerCfg {
 }
 
 thread_fn worker(cfg: WorkerCfg) {
-    HONK_BENCH_MODE = cfg.bench != 0;
+    honk::HONK_BENCH_MODE = cfg.bench != 0;
     var scfg = honk::Config {
         port: cfg.port,
         idle_ms: cfg.idle_timeout_ms,
@@ -33,7 +31,7 @@ thread_fn worker(cfg: WorkerCfg) {
     honk::listen_cfg_or_abort(scfg);
     honk::serve() { fd, date =>
         honk::request(fd, date) { ctx =>
-            dispatch(ctx);
+            honk::dispatch(ctx);
         };
     };
 }

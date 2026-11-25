@@ -12,6 +12,8 @@
 // No heap allocations: all views root at rx_buf, the per-request builders,
 // or static literals.
 
+namespace honk;
+
 import std;
 import json;
 
@@ -45,6 +47,13 @@ struct Ctx {
     extras: RespHdr[8],
     n_extra: i64,
     responded: bool,      // set by every staging helper; turn defaults false -> 404
+    // Route DSL state (first-match-wins + 404/405 tracking).
+    handled: bool,        // a route claimed this request
+    path_matched: bool,   // some route shape matched (drives 405 vs 404)
+    // Memoized request-body DOM for body_* helpers (parsed once per request).
+    dom_ready: bool,
+    dom_ok: bool,
+    dom_root: json::Node?,
     // Static file staging (honk_static): headers slice + open fd + bytes.
     resp_hdrs: const u8[:],
     resp_file_fd: i32,     // -1 when no file is staged
@@ -83,6 +92,11 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
         ctype: "text/plain",
         resp_body: "",
         responded: false,
+        handled: false,
+        path_matched: false,
+        dom_ready: false,
+        dom_ok: false,
+        dom_root: null,
         resp_hdrs: "",
         resp_file_fd: -1,
         resp_file_n: 0,

@@ -3,7 +3,7 @@
 
 import std;
 import os;
-import honk_net from "./honk_net";
+import honk from ".";
 
 struct WorkerCfg {
     port: i32,
