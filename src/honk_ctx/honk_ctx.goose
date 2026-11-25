@@ -49,9 +49,11 @@ struct Ctx {
     extras: RespHdr[8],
     n_extra: i64,
     responded: bool,      // set by every staging helper; turn defaults false -> 404
-    // Route DSL state (first-match-wins + 404/405 tracking).
-    handled: bool,        // a route claimed this request
+    // Route DSL state (first-match-wins + 404/405 tracking + lifecycle).
+    handled: bool,        // a route or guard claimed this request
     path_matched: bool,   // some route shape matched (drives 405 vs 404)
+    json_err_mode: bool,  // emit JSON {"error":...} for default 404/405/401
+    t0_ns: i64,           // > 0 when server_timing() is active for this request
     // Memoized request-body DOM for body_* helpers (parsed once per request).
     dom_ready: bool,
     dom_ok: bool,
@@ -97,6 +99,8 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
         responded: false,
         handled: false,
         path_matched: false,
+        json_err_mode: false,
+        t0_ns: 0,
         dom_ready: false,
         dom_ok: false,
         dom_root: null,
@@ -299,6 +303,17 @@ inline fn query_decoded(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
 inline fn param_decoded(c: Ctx&, i: i64) -> const u8[:], bool {
     if i < 0 || i >= 4 || i >= c.n_params { return "", false; }
     return url_decode(c, c.params[i], false);
+}
+
+// Decoded named route parameter (e.g. app.param_dec("name")).
+inline fn param_dec(c: Ctx&, name: const u8[:]) -> const u8[:], bool {
+    let n = if c.n_params <= 4 { c.n_params } else { 4 };
+    for i in n {
+        if c.param_names[i] == name {
+            return url_decode(c, c.params[i], false);
+        }
+    }
+    return "", false;
 }
 
 // Bearer token from `Authorization: Bearer <token>` (scheme case-insensitive).

@@ -31,6 +31,7 @@ extern fn honk_should_stop() -> i32;
 extern fn honk_fork_workers(n: i32) -> i32;
 extern fn honk_fork_env() -> i32;
 extern fn honk_fork_join();
+extern fn honk_now_ns() -> i64;
 extern fn honk_debug_stack_top(r: u8[>..]&) -> i64;
 extern fn honk_debug_stack_base(r: u8[>..]&) -> i64;
 extern fn honk_active_conns() -> i32;

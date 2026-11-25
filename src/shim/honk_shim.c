@@ -163,6 +163,12 @@ static int64_t monotonic_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
 
+int64_t honk_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
 static void update_tls_clock_and_date(void) {
     tls_now_ms = monotonic_ms();
     struct timespec ts;
