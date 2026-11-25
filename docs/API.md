@@ -5,7 +5,7 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.7.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v0.8.0";   // or relative "../Honk"
 import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
 import honk.src.honk_ws.honk_ws;            // opt-in: RFC 6455 WebSockets
 import honk.src.honk_openapi.honk_openapi;  // opt-in: OpenAPI 3.1.0 + Docs UI
@@ -26,11 +26,14 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | `honk::arg_port(default_port: i32) -> i32` | Reads `argv[1]` when in `1..65535`, else `default_port` |
 | `app.group(prefix) { … };` | Nestable zero-alloc route prefix group (`"/api/v1"`); skips block in one branch when prefix misses |
 | `app.cors()` / `app.cors(origin)` | One-line CORS headers + automatic `204` `OPTIONS` preflight (`handled = true`) |
+| `app.cors_cfg(allow, methods?, headers?, max_age?, creds?)` | Origin allowlist (or `"*"`) with exact-match echo, always-on `Vary: Origin`, `credentials` refused with `"*"`, `Max-Age`, auto-`204` `OPTIONS` |
 | `app.bearer() { tok => … };` | Scoped Bearer auth guard; runs block on valid token, else stages `401` (`handled = true`) |
-| `app.rate_limit(max_reqs, window_sec)` / `app.rate_limit_key(key, max, win)` | Lazy thread-local fixed-window limiter; sets `X-RateLimit-Remaining` or `429` + `Retry-After` |
-| `app.client_ip()` / `app.real_ip()` | Socket peer IPv4 / proxy-aware IP (`X-Forwarded-For`, `X-Real-IP`) |
+| `app.rate_limit(max_reqs, window_sec)` / `app.rate_limit_key(key, max, win)` | Socket-IP-keyed fixed-window limiter (unspoofable); sets `X-RateLimit-Remaining` or `429` + `Retry-After` (behind a proxy, key by `real_ip_trusted`) |
+| `honk::parse_cidrs("127.0.0.1,10.0.0.0/8")` / `app.real_ip_trusted(nets)` | Trusted-proxy allowlist (parsed once) + spoof-resistant client IP via right-to-left `X-Forwarded-For` walk, fail-closed to socket peer |
+| `app.client_ip()` / `app.real_ip()` | Socket peer IPv4 / legacy proxy-aware IP (`X-Forwarded-For`, `X-Real-IP`, no allowlist) |
 | `app.json_errors()` | Emits `application/json` `{"error":...}` for default `404` / `405` / `401` / `429` responses |
 | `app.server_timing()` | Attaches `Server-Timing: honk;dur=<ms>.<us>` measured via `CLOCK_MONOTONIC` |
+| `app.request_id()` / `app.after() { app.access_log(); };` | Validated `X-Request-Id` echo or generated `w<worker>-<ns>` / single-write NDJSON access log (`ts/m/p/s/ip/rid`, JSON-escaped) |
 | `app.after() { … };` | Resolves pending `404`/`405` first so `app.status` reflects the final status code |
 | `honk::listen_cfg(cfg)` / `honk::request_app(fd, date)` / `honk::app_run(ctx)` | Configurable / `thread_fn` entry points |
 | `honk::listen_or_abort` / `listen_cfg_or_abort` / `serve` / `request` / `honk_request_stop` / `honk_should_stop` | Low-level runner primitives |
@@ -43,7 +46,7 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | `app.get_json_raw(route, body)` | Static `200 application/json` pre-serialized literal |
 | `app.get(route) { … };` | `GET` / `HEAD` unified pattern block (`static`, `:param` + suffixes, `/*`) |
 | `app.post` / `.put` / `.patch` / `.delete` / `.options` / `.all(route) { … };` | Unified pattern blocks for each HTTP method (`all` matches any method) |
-| `app.param(name) -> val` / `app.param(i: i64) -> val` | Zero-copy `:param` lookup by name (`app.param("id")`) or index (`app.param(0)`) |
+| `app.param(name) -> val` / `app.param(i: i64) -> val` | Zero-copy `:param` lookup by name (`app.param("id")`) or index (`app.param(0)`), up to 8 params per route |
 | `app.param_dec(name) -> val, bool` | Percent-decoded named `:param` (`+` stays literal) |
 | `app.tail` | Zero-copy wildcard remainder matched by trailing `/*` |
 | `app.get_int` / `.post_int` / `.put_int` / `.patch_int` / `.delete_int(route) { id => … };` | Strict `i64` first `:param` (suffixes like `/todos/:id/toggle` allowed; auto-`400` JSON on bad int) |
@@ -62,12 +65,14 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | `j.str` / `.int` / `.num` / `.jbool` / `.jnull(key)` / `.raw(key, frag)` | Explicit-type / `null` / raw fragment writers on `JWriter` |
 | `a.add(val)` | Overloaded for `const u8[:]`, `i64`, `f64`, and `bool` on `JArray` |
 | `a.obj() { j => … };` / `a.arr() { inner => … };` / `a.jnull()` / `a.raw(frag)` | Nested object / array / `null` / raw element on `JArray` |
-| `app.body_str(key)` / `body_int(key)` / `body_bool(key)` | Memoized JSON DOM field readers (`val, bool`) |
+| `app.body_str(key)` / `body_int(key)` / `body_bool(key)` / `body_f64(key)` | Memoized JSON DOM field readers (`val, bool`) |
 | `app.require_str(key) { val => … };` | Non-empty string or `400 {"error":"invalid or missing field: <key>"}` |
 | `app.require_str_len(key, min, max) { val => … };` | Bounded-length string or `400 {"error":"invalid length for field: <key>"}` |
 | `app.require_int(key) { val => … };` | Integer field or `400 {"error":"invalid or missing field: <key>"}` |
 | `app.require_int_range(key, min, max) { val => … };` | Bounded integer or `400 {"error":"out of range: <key>"}` |
 | `app.require_bool(key) { val => … };` | Boolean field or `400 {"error":"invalid or missing field: <key>"}` |
+| `app.require_float(key) { val => … };` | Float field or `400 {"error":"invalid or missing field: <key>"}` |
+| `app.require_float_range(key, min, max) { val => … };` | Bounded float or `400 {"error":"out of range: <key>"}` |
 | `app.form(key)` / `form_or(key, def)` / `form_int(key)` | Decoded `x-www-form-urlencoded` (or `multipart/form-data` text) field |
 | `app.require_form(key) { val => … };` | Non-empty form field or `400 {"error":"invalid or missing field: <key>"}` |
 | `app.multipart_file(key) -> Part, bool` / `multipart_part(key)` | Zero-copy RFC 7578 `Part { name, filename, ctype, data, has_file }` (`filename` stripped to basename) |
@@ -112,10 +117,10 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 
 ## Static files (`honk_static`) & SQLite (`sqlite/honk_sqlite`)
 
-- **Static**: `app.static_dir(prefix, root)`, `app.static_dir_cached(prefix, root, cache_ctl)` (kernel `sendfile` + automatic `ETag` / `304 Not Modified`), `app.embed(route, data, mime = "", cache_ctl = "")` (serves compile-time `embed_file(...)` bytes with FNV-1a `ETag` / `304`), `try_serve_file`, `serve_rel`, `mime_for_rel`.
+- **Static**: `app.static_dir(prefix, root)`, `app.static_dir_cached(prefix, root, cache_ctl)` (kernel `sendfile` + automatic `ETag` / `304 Not Modified` + `Last-Modified` + media MIME rows), `app.embed(route, data, mime = "", cache_ctl = "")` (serves compile-time `embed_file(...)` bytes with FNV-1a `ETag` / `304`), `try_serve_file`, `serve_rel`, `mime_for_rel`, `http_date`.
 - **SQLite**: `db_connect(path, schema = "")`, `app.sql_json(db, sql)` (`BOOLEAN`/`BOOL` columns auto-emit `true`/`false`), `app.sql_json_one(db, sql, id)`, `app.sql_json_one_text(db, sql, val)`, `insert_text(db, sql, text)`, `run_int(db, sql, id)`, `db_open/db_enable_wal/db_exec/db_close/db_shutdown`, `db_prepare/stmt_finalize/stmt_step/stmt_reset`, `bind_int/float/text/text_static/null`, `col_int/float/is_null/text/name`, `db_last_id/db_changes`.
 
 ## WebSockets (`import honk.src.honk_ws.honk_ws;`) & OpenAPI (`import honk.src.honk_openapi.honk_openapi;`)
 
 - **WebSockets (`RFC 6455`)**: `app.ws(route) { ws => … };` (`101 Switching Protocols` + `426`/`400` validation), `ws.each_msg() { msg => … };`, `ws.recv_into(buf) -> slice, opcode, ok`, `ws.send(text)`, `ws.send_bytes(data)`, `ws.send_json() { j => … };`, `ws.ping(payload = "")`, `ws.close(code = 1000)`, `ws.set_timeout(ms)`, `honk::sha1(msg)`, `honk::b64_encode(src, out)`, `honk::ws_accept_key(key, out)`.
-- **OpenAPI `3.1.0` & Docs UI**: `app.openapi(route, title, version) { spec => … };` (`spec.desc`, `spec.server`, `spec.bearer_auth`, `spec.op`, `spec.op_int`, `spec.op_body`, `spec.op_auth` — auto `:param` → `{param}` conversion and same-path operation merging), `app.docs(route, spec_url, title = "API Reference")`.
+- **OpenAPI `3.1.0` & Docs UI**: `app.openapi(route, title, version) { spec => … };` (`spec.desc`, `spec.server`, `spec.bearer_auth`, `spec.op`, `spec.op_int`, `spec.op_body`, `spec.op_auth`, `spec.op_raw` — auto `:param` → `{param}` conversion and same-path operation merging), `app.docs(route, spec_url, title = "API Reference", cdn_url = "…")` (self-hostable Scalar CDN URL).

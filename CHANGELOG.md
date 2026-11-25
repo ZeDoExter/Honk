@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.8.0 — Hardening (trusted proxies, no silent truncation, production basics)
+
+**Breaking:** `app.rate_limit()` now keys by the socket peer IP (unspoofable).
+Behind a reverse proxy, key explicitly instead:
+`app.rate_limit_key(app.real_ip_trusted(nets), max, win)` with
+`honk::parse_cidrs("127.0.0.1,10.0.0.0/8")` parsed once in `main`.
+
+### Security & correctness
+- Trusted proxies: `parse_cidrs` / `parse_ipv4` / `real_ip_trusted` with a
+  right-to-left `X-Forwarded-For` walk (leftmost spoof ignored), fail-closed
+  to the socket peer on malformed hops.
+- C-side `honk_file_open` re-rejects `..` segments, backslashes, and NULs
+  across FFI (defense in depth behind the Goose-side validator).
+- WebSockets: strict UTF-8 validation on text messages (RFC 6455 §8.1),
+  protocol error closes with `1007`.
+- `app.cors_cfg()`: origin allowlist with exact-match echo, `Vary: Origin`
+  always in allowlist mode, `credentials` refused with `"*"`, `Max-Age`.
+- `app.request_id()` (validated echo or `w<worker>-<ns>`) + `app.access_log()`
+  (single-write NDJSON, JSON-escaped, fork-safe).
+
+### Raised ceilings (no more silent truncation where it hurts)
+- Response headers `8 → 16`, route `:params` `4 → 8` (~400 B request stack).
+- `status_text()`: added `206/408/409/412/413/414/415/416/431/500–504`.
+- Static: `Last-Modified` (pure-Goose IMF-fixdate) + media MIME rows
+  (`mp4/webm/mp3/wav/ogg/avif/gif/pdf/xml/woff`).
+- Validators: `body_f64` / `require_float` / `require_float_range`.
+- OpenAPI: `spec.op_raw()` (raw fragment before `responses`) + self-hostable
+  `app.docs(..., cdn_url)`; in-memory `Tester` captures static `resp_hdrs`.
+
 ## v0.1.0 — First public release
 
 Honk is a zero-copy HTTP/1.1 backend framework in Goose (AOT-compiled to C):
