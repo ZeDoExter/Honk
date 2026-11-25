@@ -186,6 +186,18 @@ int64_t honk_now_ns(void) {
 int64_t honk_unix_sec(void) {
     return (int64_t)time(NULL);
 }
+/* Single-shot log line to stdout (NDJSON access logs): one write() per call
+ * in the common case so forked workers sharing stdout never interleave. */
+void honk_log_line(sl_u8_shim data) {
+    if (data.len <= 0) return;
+    size_t off = 0;
+    while (off < (size_t)data.len) {
+        ssize_t n = write(STDOUT_FILENO, data.data + off, (size_t)data.len - off);
+        if (n > 0) { off += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        return;
+    }
+}
 
 static void update_tls_clock_and_date(void) {
     tls_now_ms = monotonic_ms();

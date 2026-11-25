@@ -33,6 +33,7 @@ extern fn honk_fork_env() -> i32;
 extern fn honk_fork_join();
 extern fn honk_now_ns() -> i64;
 extern fn honk_unix_sec() -> i64;
+extern fn honk_log_line(data: const u8[:]);
 extern fn honk_conn_ip(fd: i32, out: u8[>..]&) -> i64;
 extern fn honk_rate_allow(key_hash: i64, max_reqs: i32, window_ms: i32) -> i32;
 extern fn honk_rate_reset();

@@ -134,6 +134,54 @@ inline fn server_timing(app: Ctx&) {
         app.t0_ns = honk_now_ns();
     }
 }
+// Request ID: echoes incoming `X-Request-Id` only when syntactically safe
+// (1..128 chars of `[A-Za-z0-9._:-]`), else generates `w<worker>-<ns>`.
+inline fn request_id(app: Ctx&) -> const u8[:] {
+    let rid, ok = app.header("X-Request-Id");
+    if ok && rid.len >= 1 && rid.len <= 128 {
+        var clean = true;
+        for ch in rid {
+            let okc = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+                   || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_'
+                   || ch == ':' || ch == '-';
+            if !okc { clean = false; break; }
+        }
+        if clean { return rid; }
+    }
+    let start = app.tmp.len;
+    app.tmp.push('w');
+    format(app.tmp, honk_worker_id() as! i64);
+    app.tmp.push('-');
+    format(app.tmp, honk_now_ns());
+    return app.tmp[start..];
+}
+
+// Single-line JSON access log over one atomic write() so forked workers
+// never interleave lines. Path/rid are JSON-escaped (no log injection).
+// Call via `app.after() { app.access_log(); };` so `app.status` is final.
+inline fn access_log(app: Ctx&) {
+    var line: u8[>..] = [];
+    line.push('{');
+    json::format_key(line, "ts");
+    json::format_int(line, honk_unix_sec());
+    line.push(',');
+    json::format_key(line, "m");
+    json::format_string(line, app.method);
+    line.push(',');
+    json::format_key(line, "p");
+    json::format_string(line, app.path);
+    line.push(',');
+    json::format_key(line, "s");
+    json::format_int(line, app.status);
+    line.push(',');
+    json::format_key(line, "ip");
+    json::format_string(line, app.client_ip());
+    line.push(',');
+    json::format_key(line, "rid");
+    json::format_string(line, app.request_id());
+    line.append("}\n");
+    honk_log_line(line);
+}
 
 // Post-route hook: finalizes 404/405 first so `app.status` reflects the final code.
 inline fn after<F>(app: Ctx&) {
