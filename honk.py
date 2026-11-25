@@ -296,42 +296,61 @@ def cmd_build(args):
     return 0
 
 
-def goose_mtimes(app_dir):
+WATCH_EXTS = (".goose", ".c", ".h", ".sql", ".build")
+COMPILED_EXTS = (".goose", ".c", ".h", ".build")
+
+
+def watch_mtimes(dirs):
     out = {}
-    for root, _ds, files in os.walk(app_dir):
-        if "node_modules" in root or ".git" in root:
-            continue
-        for fn in files:
-            if fn.endswith(".goose"):
-                p = os.path.join(root, fn)
-                try:
-                    out[p] = os.path.getmtime(p)
-                except OSError:
-                    pass
+    for app_dir in dirs:
+        for root, _ds, files in os.walk(app_dir):
+            if "node_modules" in root or ".git" in root:
+                continue
+            for fn in files:
+                if fn.endswith(WATCH_EXTS):
+                    p = os.path.join(root, fn)
+                    try:
+                        out[p] = os.path.getmtime(p)
+                    except OSError:
+                        pass
     return out
 
 
 def cmd_dev(args):
     sys.stdout.reconfigure(line_buffering=True)
-    path = args[0] if args and not args[0].startswith("-") else None
-    extra = [a for a in args if a != path]
+    rest = list(args)
+    extra_watch = []
+    while "--watch" in rest:
+        wi = rest.index("--watch")
+        if wi + 1 >= len(rest):
+            print("error: --watch needs a directory", file=sys.stderr)
+            return 2
+        extra_watch.append(rest.pop(wi + 1))
+        rest.pop(wi)
+    path = rest[0] if rest and not rest[0].startswith("-") else None
+    extra = [a for a in rest if a != path]
     app = resolve_app(path)
     if app is None:
         return 2
     app_dir, goose_file, name = app
     out = os.path.join(app_dir, f".honk-dev-{name}")
+    watch_dirs = [app_dir] + [d if os.path.isabs(d) else os.path.abspath(d)
+                              for d in extra_watch]
     print(f"dev {goose_file} (rebuild on save, Ctrl-C to stop)")
     proc = None
 
-    def start():
+    def spawn():
         nonlocal proc
+        proc = subprocess.Popen([out] + extra, cwd=app_dir)
+        print(f"[dev] up: {out} (pid {proc.pid})")
+
+    def start():
         ok, log = build_app(goose_file, out)
         if not ok:
             print(log)
             print("[dev] build failed — fix and save to retry")
             return
-        proc = subprocess.Popen([out] + extra, cwd=app_dir)
-        print(f"[dev] up: {out} (pid {proc.pid})")
+        spawn()
 
     def stop():
         nonlocal proc
@@ -344,19 +363,28 @@ def cmd_dev(args):
         proc = None
 
     start()
-    known = goose_mtimes(app_dir)
+    known = watch_mtimes(watch_dirs)
     try:
         while True:
             time.sleep(0.3)
             if proc and proc.poll() is not None:
                 print(f"[dev] process exited (code {proc.returncode}) — waiting for changes")
                 proc = None
-            now = goose_mtimes(app_dir)
+            now = watch_mtimes(watch_dirs)
             if now != known:
+                changed = [p for p in set(now) | set(known) if now.get(p) != known.get(p)]
                 known = now
-                print("[dev] change detected — rebuilding...")
-                stop()
-                start()
+                if any(p.endswith(COMPILED_EXTS) for p in changed):
+                    print("[dev] change detected — rebuilding...")
+                    stop()
+                    start()
+                else:
+                    print("[dev] data-only change — restarting...")
+                    stop()
+                    if os.path.isfile(out):
+                        spawn()
+                    else:
+                        start()
     except KeyboardInterrupt:
         print("\n[dev] stopping")
     finally:
