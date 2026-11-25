@@ -115,7 +115,7 @@ def cmd_setup(_args):
     return cmd_doctor([])
 
 
-HONK_GIT_SOURCE = "ZeDoExter/Honk@v0.3.0"
+HONK_GIT_SOURCE = "ZeDoExter/Honk@v0.4.0"
 
 SCAFFOLD_MAIN = '''// {name} -- a Honk application (no .build file needed).
 //
@@ -404,10 +404,11 @@ def cmd_test(_args):
         if r.returncode != 0:
             raise subprocess.CalledProcessError(r.returncode, cmd)
 
-    gate("build: servers + stack + helpers + dsl + fullstack-test + quickstart + fullstack", lambda: [
+    gate("build: servers + stack + unit + helpers + dsl + fullstack-test + quickstart + fullstack", lambda: [
         build("src/server_minimal.goose", "src/server_minimal"),
         build("src/server.goose", "src/server"),
         build("test/test_stack_discipline.goose", "test/test_stack_discipline"),
+        build("test/test_unit_app.goose", "test/test_unit_app"),
         build("test/helpers_app.goose", "test/helpers_app"),
         build("test/app_dsl.goose", "test/app_dsl"),
         build("test/app_fullstack.goose", "test/app_fullstack"),
@@ -416,6 +417,8 @@ def cmd_test(_args):
     ])
     gate("stack discipline 900k turns",
          lambda: suite(["./test/test_stack_discipline"]))
+    gate("in-memory unit suite (Release)",
+         lambda: suite(["./test/test_unit_app"]))
     gate("transport suite (Release)",
          lambda: suite(["python3", "test/test_transport.py", "./src/server_minimal"]))
     gate("framework suite (Release)",
@@ -424,13 +427,16 @@ def cmd_test(_args):
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app", "18420", "Release"]))
     gate("app-dsl + runtime suite (Release)",
          lambda: suite(["python3", "test/test_dsl.py", "./test/app_dsl", "18430", "Release"]))
-    gate("build: ASan server + helpers + dsl + fullstack-test + fullstack", lambda: [
+    gate("build: ASan server + unit + helpers + dsl + fullstack-test + fullstack", lambda: [
         build_asan("src/server.goose", "src/server_asan"),
+        build_asan("test/test_unit_app.goose", "test/test_unit_app_asan"),
         build_asan("test/helpers_app.goose", "test/helpers_app_asan"),
         build_asan("test/app_dsl.goose", "test/app_dsl_asan"),
         build_asan("test/app_fullstack.goose", "test/app_fullstack_asan"),
         build_asan("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app_asan"),
     ])
+    gate("in-memory unit suite (ASan+UBSan+LSan)",
+         lambda: suite(["./test/test_unit_app_asan"]))
     gate("framework suite (ASan+UBSan+LSan)",
          lambda: suite(["python3", "test/test_framework.py", "./src/server_asan", "18310", "ASan"]))
     gate("web-helper suite (ASan+UBSan+LSan)",

@@ -102,6 +102,26 @@ fn dsl_routes(app: honk::Ctx&) {
     app.get_wild("/compat/w/*") { rest => app.ok(rest); };
     app.patch_wild("/pw/") { rest => app.ok(rest); };
 
+    // v0.4.0: nested group + bearer + nested JSON + named-field range validator
+    app.group("/v1") {
+        app.get("/tree") {
+            app.json() { j =>
+                j.obj("meta") { m => m.set("ver", 4); };
+                j.arr("items") { a => a.add("x"); a.add("y"); };
+            };
+        };
+        app.post("/age-check") {
+            app.require_int_range("age", 1, 130) { age =>
+                app.json() { j => j.set("age", age); };
+            };
+        };
+        app.group("/sec") {
+            app.bearer() { tok =>
+                app.get("/who") { app.ok(tok); };
+            };
+        };
+    };
+
     // 128 KiB response with shrunk SO_SNDBUF (16 KiB) for SIGTERM drain test.
     app.get("/bigstream") {
         honk_shrink_sndbuf(app.fd);

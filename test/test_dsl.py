@@ -159,7 +159,19 @@ def test_jwriter_and_body_helpers(port):
     assert req(port, "POST", "/req-str", b'{"title":"buy oats"}')[0:3:2] == (200, b"buy oats")
     for bad in [b"{}", b'{"title":""}', b'{"title":123}', b"{bad json"]:
         code, _, body = req(port, "POST", "/req-str", bad)
-        assert code == 400 and pyjson.loads(body) == {"error": "invalid or missing field"}, (bad, code, body)
+        assert code == 400 and pyjson.loads(body) == {"error": "invalid or missing field: title"}, (bad, code, body)
+
+    # Nested group + nested obj/arr + range validator + bearer guard over TCP
+    code, _, body = req(port, "GET", "/v1/tree")
+    assert code == 200 and pyjson.loads(body) == {"meta": {"ver": 4}, "items": ["x", "y"]}
+
+    code, _, body = req(port, "POST", "/v1/age-check", b'{"age":200}')
+    assert code == 400 and pyjson.loads(body) == {"error": "out of range: age"}
+    code, _, body = req(port, "POST", "/v1/age-check", b'{"age":30}')
+    assert code == 200 and pyjson.loads(body) == {"age": 30}
+
+    code, _, _ = req(port, "GET", "/v1/sec/who")
+    assert code == 401
     print("  [PASS] test_jwriter_and_body_helpers")
 
 

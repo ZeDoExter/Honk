@@ -15,6 +15,8 @@ src/server
 src/server_asan
 test/test_stack_discipline
 test/test_stack_discipline_asan
+test/test_unit_app
+test/test_unit_app_asan
 test/helpers_app
 test/helpers_app_asan
 test/app_dsl
