@@ -47,7 +47,7 @@ struct Ctx {
     status: i64,
     ctype: const u8[:],
     resp_body: const u8[:],   // direct slice OR per-request builder range
-    extras: RespHdr[8],
+    extras: RespHdr[16],
     n_extra: i64,
     responded: bool,      // set by every staging helper; turn defaults false -> 404
     // Route DSL state (first-match-wins + 404/405 tracking + lifecycle).
@@ -429,7 +429,7 @@ fn real_ip(c: Ctx&) -> const u8[:] {
 
 // Stage a custom response header (max 8; extras beyond are dropped).
 fn set_header(c: Ctx&, name: const u8[:], val: const u8[:]) {
-    if c.n_extra < 8 {
+    if c.n_extra < 16 {
         c.extras[c.n_extra] = RespHdr { name: name, val: val };
         c.n_extra++;
     }
@@ -597,9 +597,9 @@ fn emit(c: Ctx&, out: u8[>..]&, date: const u8[:]) {
     out.append(c.ctype);
     out.append("\r\nDate: ");
     out.append(date);
-    assert(c.n_extra <= 8);
+    assert(c.n_extra <= 16);
     let n_ex = c.n_extra;
-    assert(n_ex <= 8);
+    assert(n_ex <= 16);
     for i in n_ex {
         out.append("\r\n");
         out.append(c.extras[i].name);

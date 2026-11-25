@@ -866,7 +866,7 @@ fn stream_begin(app: Ctx&, ctype: const u8[:]) -> bool {
     hdr.append(app.ctype);
     hdr.append("\r\nDate: ");
     hdr.append(app.date);
-    let n_ex = if app.n_extra <= 8 { app.n_extra } else { 8 };
+    let n_ex = if app.n_extra <= 16 { app.n_extra } else { 16 };
     for i in n_ex {
         hdr.append("\r\n");
         hdr.append(app.extras[i].name);

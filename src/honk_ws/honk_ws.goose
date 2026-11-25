@@ -426,7 +426,7 @@ inline fn ws<F>(app: Ctx&, route: const u8[:]) {
                 hs.append(accept);
                 hs.append("\r\nDate: ");
                 hs.append(app.date);
-                let n_ex = if app.n_extra <= 8 { app.n_extra } else { 8 };
+                let n_ex = if app.n_extra <= 16 { app.n_extra } else { 16 };
                 for i in n_ex {
                     hs.append("\r\n");
                     hs.append(app.extras[i].name);
