@@ -16,7 +16,7 @@ need **five** Goose ideas (cheat sheet below) to ship a Honk API.
 
 ```sh
 ./honk new my-api && ./honk dev my-api        # portable relative import (works offline)
-# or: ./honk new my-api --git                 # pinned to "ZeDoExter/Honk@v0.9.0"
+# or: ./honk new my-api --git                 # pinned to "ZeDoExter/Honk@v0.10.0"
 ```
 
 Notice only **one file** is created (`my-api/main.goose`) — Honk packages its own C
@@ -64,7 +64,7 @@ like you expect. Types you will see: `i64` (int), `f64` (float), `u8` (byte),
 A minimal server is 4 lines in a single `.goose` file:
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.9.0";
+import honk from "ZeDoExter/Honk@v0.10.0";
 fn main() {
     honk::listen(18080) { app => app.get("/", "Hello, World!"); };
 }
@@ -74,7 +74,7 @@ Add `:params`, `*` wildcards, overloaded `j.set` JSON streaming, and validated
 `POST` bodies with zero boilerplate:
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.9.0";
+import honk from "ZeDoExter/Honk@v0.10.0";
 
 fn main() {
     honk::listen(honk::arg_port(18080)) { app =>

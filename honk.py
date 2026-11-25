@@ -115,7 +115,7 @@ def cmd_setup(_args):
     return cmd_doctor([])
 
 
-HONK_GIT_SOURCE = "ZeDoExter/Honk@v0.9.0"
+HONK_GIT_SOURCE = "ZeDoExter/Honk@v0.10.0"
 
 SCAFFOLD_MAIN = '''// {name} -- a Honk application (no .build file needed).
 //
@@ -432,13 +432,14 @@ def cmd_test(_args):
         if r.returncode != 0:
             raise subprocess.CalledProcessError(r.returncode, cmd)
 
-    gate("build: servers + stack + unit + helpers + dsl + fullstack-test + quickstart + fullstack", lambda: [
+    gate("build: servers + stack + unit + helpers + dsl + net + fullstack-test + quickstart + fullstack", lambda: [
         build("src/server_minimal.goose", "src/server_minimal"),
         build("src/server.goose", "src/server"),
         build("test/test_stack_discipline.goose", "test/test_stack_discipline"),
         build("test/test_unit_app.goose", "test/test_unit_app"),
         build("test/helpers_app.goose", "test/helpers_app"),
         build("test/app_dsl.goose", "test/app_dsl"),
+        build("test/app_net.goose", "test/app_net"),
         build("test/app_fullstack.goose", "test/app_fullstack"),
         build("examples/quickstart/app.goose", "examples/quickstart/app"),
         build("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app"),
@@ -455,11 +456,14 @@ def cmd_test(_args):
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app", "18420", "Release"]))
     gate("app-dsl + runtime suite (Release)",
          lambda: suite(["python3", "test/test_dsl.py", "./test/app_dsl", "18430", "Release"]))
-    gate("build: ASan server + unit + helpers + dsl + fullstack-test + fullstack", lambda: [
+    gate("net suite (Release)",
+         lambda: suite(["python3", "test/test_net.py", "./test/app_net", "18470", "Release"]))
+    gate("build: ASan server + unit + helpers + dsl + net + fullstack-test + fullstack", lambda: [
         build_asan("src/server.goose", "src/server_asan"),
         build_asan("test/test_unit_app.goose", "test/test_unit_app_asan"),
         build_asan("test/helpers_app.goose", "test/helpers_app_asan"),
         build_asan("test/app_dsl.goose", "test/app_dsl_asan"),
+        build_asan("test/app_net.goose", "test/app_net_asan"),
         build_asan("test/app_fullstack.goose", "test/app_fullstack_asan"),
         build_asan("examples/fullstack_todo/app.goose", "examples/fullstack_todo/app_asan"),
     ])
@@ -471,6 +475,8 @@ def cmd_test(_args):
          lambda: suite(["python3", "test/test_web.py", "./test/helpers_app_asan", "18421", "ASan"]))
     gate("app-dsl + runtime suite (ASan+UBSan+LSan)",
          lambda: suite(["python3", "test/test_dsl.py", "./test/app_dsl_asan", "18460", "ASan"]))
+    gate("net suite (ASan+UBSan+LSan)",
+         lambda: suite(["python3", "test/test_net.py", "./test/app_net_asan", "18471", "ASan"]))
     gate("fullstack suite (Release)",
          lambda: suite(["python3", "test/test_fullstack.py", "./test/app_fullstack", "18440", "Release"]))
     gate("fullstack suite (ASan+UBSan+LSan)",

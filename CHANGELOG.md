@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.10.0 — Dual-Stack IPv6, Bind Control & Unix Domain Sockets
+
+### Networking
+- Dual-stack listener: `AF_INET6 ::` with `IPV6_V6ONLY=0` by default
+  (graceful `AF_INET` fallback on kernels without v6); v4-mapped peers
+  report plain dotted-quad `client_ip` (backward compatible, never
+  `::ffff:a.b.c.d`); native v6 via `inet_ntop`.
+- Unified 128-bit CIDR matcher (pure Goose, `hi`/`lo` u64): v4 maps to
+  `::ffff:0:0/96`, `::` compression + embedded-v4 + `[…]` brackets +
+  `/0`..`/128` (shift-safe, no `>> 64` UB); same
+  `parse_cidrs("127.0.0.1,10.0.0.0/8,::1,fc00::/7")` signature, now 16 entries.
+- Bind control: `honk::listen_at("127.0.0.1" | "::1" | "v6only:::" | …, port)`
+  and `$HONK_BIND` env (all runners, default `"::"`).
+- Unix sockets: `honk::listen_at("unix:/path.sock", 0)` — pre-fork single
+  bind shared by all `HONK_WORKERS` (no `EADDRINUSE`), stale `S_ISSOCK`
+  cleanup only (regular files never unlinked), `0660` perms, `client_ip`
+  `"unix"`, owner-only `unlink` on shutdown.
+- Audit: nothing parses `Host` for ports (path-based routing); XFF walks
+  accept bracketed (`[::1]`, `[::1]:8080`) and unbracketed v6 hops.
+
+### CLI
+- `./honk dev` watches `.c`/`.h`/`.sql`/`.build` alongside `.goose`
+  (rebuild on code, restart-only on data) plus repeatable `--watch <dir>`.
+
 ## v0.9.0 — Static & Media Delivery Complete
 
 ### Byte ranges & conditional static

@@ -5,7 +5,7 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.9.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v0.10.0";   // or relative "../Honk"
 import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
 import honk.src.honk_ws.honk_ws;            // opt-in: RFC 6455 WebSockets
 import honk.src.honk_openapi.honk_openapi;  // opt-in: OpenAPI 3.1.0 + Docs UI
@@ -21,6 +21,7 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | Signature | Notes |
 |---|---|
 | `honk::listen(port: i32) { app => … };` | 1 worker by default, or `$HONK_WORKERS` (`1..64` / `"auto"`) `SO_REUSEPORT` processes; auto `404`/`405`; drains up to `2s` on `SIGINT`/`SIGTERM` |
+| `honk::listen_at(bind, port) { app => … };` | Explicit bind: `"0.0.0.0"`, `"127.0.0.1"`, `"::"`, `"::1"`, v6 literal, `"v6only:::"`, or `"unix:/path.sock"` (`$HONK_BIND` or `"::"` when using `listen`) |
 | `honk::listen_workers(port: i32, n: i32) { app => … };` | Explicit multi-worker `listen` (`0` = `sched_getaffinity` CPU count, `1..64`) |
 | `honk::workers(n: i32) -> i32` / `honk::workers_env() -> i32` | Pre-`db_open()` worker fork (`0` = auto, `1..64`, or `$HONK_WORKERS`) |
 | `honk::arg_port(default_port: i32) -> i32` | Reads `argv[1]` when in `1..65535`, else `default_port` |
@@ -29,8 +30,8 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | `app.cors_cfg(allow, methods?, headers?, max_age?, creds?)` | Origin allowlist (or `"*"`) with exact-match echo, always-on `Vary: Origin`, `credentials` refused with `"*"`, `Max-Age`, auto-`204` `OPTIONS` |
 | `app.bearer() { tok => … };` | Scoped Bearer auth guard; runs block on valid token, else stages `401` (`handled = true`) |
 | `app.rate_limit(max_reqs, window_sec)` / `app.rate_limit_key(key, max, win)` | Socket-IP-keyed fixed-window limiter (unspoofable); sets `X-RateLimit-Remaining` or `429` + `Retry-After` (behind a proxy, key by `real_ip_trusted`) |
-| `honk::parse_cidrs("127.0.0.1,10.0.0.0/8")` / `app.real_ip_trusted(nets)` | Trusted-proxy allowlist (parsed once) + spoof-resistant client IP via right-to-left `X-Forwarded-For` walk, fail-closed to socket peer |
-| `app.client_ip()` / `app.real_ip()` | Socket peer IPv4 / legacy proxy-aware IP (`X-Forwarded-For`, `X-Real-IP`, no allowlist) |
+| `honk::parse_cidrs("127.0.0.1,10.0.0.0/8,::1,fc00::/7")` / `app.real_ip_trusted(nets)` | Trusted-proxy allowlist, max 16 (parsed once) + spoof-resistant client IP via right-to-left `X-Forwarded-For` walk over unified 128-bit v4/v6 addrs, fail-closed to socket peer |
+| `app.client_ip()` / `app.real_ip()` | Socket peer (`"127.0.0.1"` / `"::1"` / `"unix"` for Unix sockets) / legacy proxy-aware IP (no allowlist) |
 | `app.json_errors()` | Emits `application/json` `{"error":...}` for default `404` / `405` / `401` / `429` responses |
 | `app.server_timing()` | Attaches `Server-Timing: honk;dur=<ms>.<us>` measured via `CLOCK_MONOTONIC` |
 | `app.request_id()` / `app.after() { app.access_log(); };` | Validated `X-Request-Id` echo or generated `w<worker>-<ns>` / single-write NDJSON access log (`ts/m/p/s/ip/rid`, JSON-escaped) |
