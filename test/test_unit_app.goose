@@ -631,6 +631,47 @@ fn main() {
     let st_lm, st_lm_ok = t.header("Last-Modified");
     let st_cl, st_cl_ok = t.header("Content-Length");
     assert(t.status == 200 && st_etag_ok && st_lm_ok && st_cl_ok && st_cl.len > 0);
+    // 12. v0.9.0: embed Range 206/416 + If-Range + IMF-fixdate round-trip
+    t.get("/embedded.html") { app => api_routes(app); };
+    assert(t.status == 200);
+    var emb_full: u8[>..] = [];
+    emb_full.append(t.body());
+    let emb_etag, _ = t.header("ETag");
+    var emb_etag_saved: u8[>..] = [];
+    emb_etag_saved.append(emb_etag);
+
+    var rg_hdr: u8[>..] = [];
+    rg_hdr.append("Range: bytes=0-9\r\n");
+    t.get_headers("/embedded.html", rg_hdr[..]) { app => api_routes(app); };
+    let cr_h, cr_ok = t.header("Content-Range");
+    assert(t.status == 206 && cr_ok && t.body() == emb_full[..10]);
+    assert(has_sub(cr_h, "bytes 0-9/"));
+
+    var rg416: u8[>..] = [];
+    rg416.append("Range: bytes=99999999-\r\n");
+    t.get_headers("/embedded.html", rg416[..]) { app => api_routes(app); };
+    assert(t.status == 416 && t.body() == "");
+
+    var rg_ir: u8[>..] = [];
+    rg_ir.append("Range: bytes=0-9\r\nIf-Range: ");
+    rg_ir.append(emb_etag_saved[..]);
+    rg_ir.append("\r\n");
+    t.get_headers("/embedded.html", rg_ir[..]) { app => api_routes(app); };
+    assert(t.status == 206 && t.body() == emb_full[..10]);
+
+    var rg_ir_bad: u8[>..] = [];
+    rg_ir_bad.append("Range: bytes=0-9\r\nIf-Range: \"stale\"\r\n");
+    t.get_headers("/embedded.html", rg_ir_bad[..]) { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == emb_full[..]);
+
+    var dbuf: u8[>..] = [];
+    let ds = http_date(784111777, dbuf);
+    assert(ds == "Sun, 06 Nov 1994 08:49:37 GMT");
+    let back, bok = parse_imf_date(ds);
+    assert(bok && back == 784111777);
+    let _, bad_dt = parse_imf_date("yesterday");
+    assert(!bad_dt);
+
 
     // 10. 10,000 in-memory requests loop + rate-table cleanup for LSan
     for _ in 10000 {

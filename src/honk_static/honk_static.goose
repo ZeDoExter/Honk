@@ -47,6 +47,7 @@ inline fn embed(app: honk::Ctx&, route: const u8[:], data: const u8[:],
     let etag = app.tmp[estart..];
 
     app.set_header("ETag", etag);
+    app.set_header("Accept-Ranges", "bytes");
     if cache_ctl.len > 0 {
         app.set_header("Cache-Control", cache_ctl);
     }
@@ -391,7 +392,34 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
         c.tmp.append("index.html");
         rel = c.tmp[start..];
     }
-    let fd = honk_file_open(root, rel);
+    // Precompressed variants: prefer `rel.br`, then `rel.gz`, when the client
+    // accepts them (identity fallback otherwise; Range always uses identity).
+    // Only probed for compressible types (skips wasted openat on media/fonts);
+    // variant ETags carry a `-br`/`-gz` suffix; MIME stays original.
+    let mime_early = mime_for_rel(rel);
+    var enc: const u8[:] = "";
+    var fd: i32 = -1;
+    let ae, has_ae = c.header("Accept-Encoding");
+    let rg0, has_rg0 = c.header("Range");
+    if !has_rg0 && has_ae && mime_is_compressible(mime_early) {
+        if ae_has_token(ae, "br") {
+            var cand: u8[>..] = [];
+            cand.append(rel);
+            cand.append(".br");
+            fd = honk_file_open(root, cand[..]);
+            if fd >= 0 { enc = "br"; }
+        }
+        if fd < 0 && ae_has_token(ae, "gzip") {
+            var cand: u8[>..] = [];
+            cand.append(rel);
+            cand.append(".gz");
+            fd = honk_file_open(root, cand[..]);
+            if fd >= 0 { enc = "gzip"; }
+        }
+    }
+    if fd < 0 {
+        fd = honk_file_open(root, rel);
+    }
     if fd < 0 { return false; }
     let size = honk_file_size(fd);
     if size < 0 {
@@ -399,7 +427,7 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
         return false;
     }
     let mtime = honk_file_mtime(fd);
-    let mime = mime_for_rel(rel);
+    let mime = mime_early;
 
     let estart = c.tmp.len;
     c.tmp.append("W/\"");
@@ -493,7 +521,6 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
         c.status = 200;
         c.ctype = mime;
         c.resp_body = "";
-        c.resp_len = size;
         c.responded = true;
         honk_file_close(fd);
         return true;
@@ -508,6 +535,20 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     c.res.append(etag);
     c.res.append("\r\nLast-Modified: ");
     c.res.append(lm);
+    c.res.append("\r\nAccept-Ranges: bytes");
+    c.res.append("\r\nVary: Accept-Encoding");
+    if enc.len > 0 {
+        c.res.append("\r\nContent-Encoding: ");
+        c.res.append(enc);
+    }
+    if has_range {
+        c.res.append("\r\nContent-Range: bytes ");
+        format(c.res, rs);
+        c.res.push('-');
+        format(c.res, re);
+        c.res.push('/');
+        format(c.res, size);
+    }
     if cache_ctl.len > 0 {
         c.res.append("\r\nCache-Control: ");
         c.res.append(cache_ctl);
@@ -515,8 +556,9 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     if !c.keep_alive {
         c.res.append("\r\nConnection: close");
     }
+    let body_n = if has_range { re - rs + 1 } else { size };
     c.res.append("\r\nContent-Length: ");
-    format(c.res, size);
+    format(c.res, body_n);
     c.res.append("\r\n\r\n");
     c.resp_hdrs = c.res[hstart..];
     c.resp_file_fd = fd;

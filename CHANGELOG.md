@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.9.0 — Static & Media Delivery Complete
+
+### Byte ranges & conditional static
+- `Range` single-range `206 Partial Content` (`<start>-<end>`, `<start>-`,
+  `-<suffix>`) on `GET`/`HEAD` for files (offset `sendfile`) and `embed`;
+  `Accept-Ranges: bytes` on `200`/`206`; multi-range/garbage falls back to
+  `200`; unsatisfiable (`start >= size`, `start > end`, `-0`, empty file)
+  answers `416` with `Content-Range: bytes */<size>`.
+- `If-Range`: exact `Last-Modified` match keeps the range, anything else
+  (stale date, any `ETag` — file tags are weak) serves full `200`.
+- `If-Modified-Since` → `304` via a pure-Goose IMF-fixdate parser (inverse
+  of `http_date`, `0` C externs); RFC 9110 §13.2.2 precedence — any present
+  `If-None-Match` disables IMS evaluation; malformed dates serve `200`.
+- New `app.static_file(route, root, rel, cache_ctl = "")` single-file helper
+  (non-breaking companion to `static_dir` / `static_dir_cached`).
+
+### Precompressed sidecars (zero C libraries)
+- `Accept-Encoding` negotiation (`br` preferred over `gzip`, `;q=0` honored):
+  serves `<path>.br` / `<path>.gz` sidecars with original MIME,
+  `Content-Encoding`, always-on `Vary: Accept-Encoding`, and `-br`/`-gz`
+  `ETag` suffixes. Only probed for compressible types (text/JSON/XML/SVG/
+  WASM — never media/fonts) and never combined with `Range`.
+
 ## v0.8.0 — Hardening (trusted proxies, no silent truncation, production basics)
 
 **Breaking:** `app.rate_limit()` now keys by the socket peer IP (unspoofable).

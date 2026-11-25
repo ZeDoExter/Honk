@@ -8,6 +8,7 @@ plus an examples/fullstack_todo end-to-end smoke. Asserts clean exit 0,
 zero sanitizer findings, and zero leaked file descriptors.
 """
 
+import gzip
 import hashlib
 import json as pyjson
 import os
@@ -68,6 +69,14 @@ def setup_fixtures(tag):
         f.write(b"\x00\x00\x00\x18ftypmp42-test-bytes")
     with open(os.path.join(root, "song.mp3"), "wb") as f:
         f.write(b"ID3-test-bytes")
+    with open(os.path.join(root, "app.js"), "rb") as f:
+        _js = f.read()
+    with open(os.path.join(root, "app.js.gz"), "wb") as f:
+        f.write(gzip.compress(_js))
+    with open(os.path.join(root, "app.js.br"), "wb") as f:
+        f.write(b"BR:" + _js)
+    with open(os.path.join(root, "clip.mp4.gz"), "wb") as f:
+        f.write(b"SHOULD-NEVER-SERVE")
     os.symlink("/etc/hostname", os.path.join(root, "evil-link"))
     os.mkfifo(os.path.join(root, "myfifo"))
     dbpath = os.path.join(root, "t.db")
@@ -220,6 +229,161 @@ def test_static_pipeline(port):
     assert c3 == 200 and pyjson.loads(b3) == {"fixture": True, "n": 42}, (c3, b3)
     s.close()
     print("  [PASS] test_static_pipeline")
+def test_static_conditional(port, root):
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, hdrs, _ = read_response(f)
+    s.close()
+    assert code == 200, code
+    lm, etag = hdrs[b"last-modified"], hdrs[b"etag"]
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: " + lm + b"\r\nConnection: close\r\n\r\n")
+    code, h304, _ = read_response(f, skip_body=True)
+    assert code == 304 and h304[b"etag"] == etag and h304[b"last-modified"] == lm and f.read() == b"", (code, h304)
+    s.close()
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\n\r\n")
+    code, _, body = read_response(f)
+    assert code == 200 and len(body) > 0, code
+    s.close()
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: yesterday\r\nConnection: close\r\n\r\n")
+    code, _, _ = read_response(f)
+    assert code == 200, code
+    s.close()
+    # INM present (mismatch) + IMS match -> IMS ignored -> 200 (RFC 9110 S13.2.2)
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nIf-None-Match: \"nope\"\r\nIf-Modified-Since: " + lm + b"\r\nConnection: close\r\n\r\n")
+    code, _, _ = read_response(f)
+    assert code == 200, code
+    s.close()
+    print("  [PASS] test_static_conditional")
+
+
+def test_static_range(port, root):
+    with open(os.path.join(root, "app.js"), "rb") as f:
+        data = f.read()
+    n = len(data)
+
+    def get_range(hdr):
+        s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nRange: " + hdr + b"\r\nConnection: close\r\n\r\n")
+        out = read_response(f)
+        s.close()
+        return out
+
+    code, h, body = get_range(b"bytes=0-9")
+    assert code == 206 and h[b"content-range"] == ("bytes 0-9/%d" % n).encode() and body == data[0:10], (code, h)
+    assert h[b"accept-ranges"] == b"bytes" and h[b"content-length"] == b"10"
+    code, h, body = get_range(b"bytes=%d-" % (n - 5))
+    assert code == 206 and body == data[n - 5:] and h[b"content-length"] == b"5", (code, h)
+    code, h, body = get_range(b"bytes=0-999999")
+    assert code == 206 and body == data and h[b"content-range"] == ("bytes 0-%d/%d" % (n - 1, n)).encode(), (code, h)
+    code, h, body = get_range(b"bytes=-8")
+    assert code == 206 and body == data[-8:], (code, h)
+    code, h, body = get_range(b"bytes=-999999")
+    assert code == 206 and body == data, (code, h)
+
+    s = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+    s.sendall(b"HEAD /app.js HTTP/1.1\r\nHost: x\r\nRange: bytes=2-5\r\nConnection: close\r\n\r\n")
+    f = s.makefile("rb")
+    code, h, _ = read_response(f, skip_body=True)
+    assert code == 206 and h[b"content-range"] == ("bytes 2-5/%d" % n).encode() and h[b"content-length"] == b"4" and f.read() == b"", (code, h)
+    s.close()
+
+    for bad in (b"bytes=%d-%d" % (n, n + 10), b"bytes=9-2", b"bytes=-0"):
+        code, h, body = get_range(bad)
+        assert code == 416 and h[b"content-range"] == ("bytes */%d" % n).encode() and body == b"", (bad, code, h)
+    for fb in (b"bytes=0-1,4-5", b"items=0-1", b"bytes=abc"):
+        code, h, body = get_range(fb)
+        assert code == 200 and body == data, (fb, code)
+
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    _, hdrs0, _ = read_response(f)
+    s.close()
+    lm0, etag0 = hdrs0[b"last-modified"], hdrs0[b"etag"]
+
+    def get_range_ir(rg, ir):
+        s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nRange: " + rg + b"\r\nIf-Range: " + ir + b"\r\nConnection: close\r\n\r\n")
+        out = read_response(f)
+        s.close()
+        return out
+
+    code, _, body = get_range_ir(b"bytes=0-9", lm0)
+    assert code == 206 and body == data[0:10], code
+    code, _, body = get_range_ir(b"bytes=0-9", b"Sun, 06 Nov 1994 08:49:37 GMT")
+    assert code == 200 and body == data, code
+    code, _, body = get_range_ir(b"bytes=0-9", etag0)
+    assert code == 200 and body == data, (code, etag0)
+    print("  [PASS] test_static_range")
+
+
+def test_static_range_big_eagain(port):
+    s, f = req(port, b"GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, full = read_response(f)
+    s.close()
+    assert code == 200 and len(full) == 2 * 1024 * 1024, (code, len(full))
+    s = socket.create_connection(("127.0.0.1", port), timeout=120.0)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+    s.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=1048576-2097151\r\nConnection: close\r\n\r\n")
+    f = s.makefile("rb")
+    status = f.readline()
+    assert status.startswith(b"HTTP/1.1 206"), status
+    hdrs = {}
+    while True:
+        line = f.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+        k, v = line.split(b":", 1)
+        hdrs[k.strip().lower()] = v.strip()
+    assert hdrs[b"content-range"] == b"bytes 1048576-2097151/2097152", hdrs
+    assert hdrs[b"content-length"] == b"1048576", hdrs
+    body = b""
+    while len(body) < 1048576:
+        chunk = f.read(1048576 - len(body))
+        assert chunk, "EOF in 206 body"
+        body += chunk
+    s.close()
+    assert body == full[1048576:], len(body)
+    print("  [PASS] test_static_range_big_eagain")
+
+
+def test_static_precompressed(port, root):
+    with open(os.path.join(root, "app.js"), "rb") as f:
+        raw = f.read()
+    with open(os.path.join(root, "app.js.gz"), "rb") as f:
+        gz = f.read()
+    with open(os.path.join(root, "app.js.br"), "rb") as f:
+        br = f.read()
+
+    def get_ae(extra):
+        s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\n" + extra + b"Connection: close\r\n\r\n")
+        out = read_response(f)
+        s.close()
+        return out
+
+    code, h, body = get_ae(b"Accept-Encoding: gzip\r\n")
+    assert code == 200 and body == gz and h[b"content-encoding"] == b"gzip", (code, h)
+    assert h[b"content-type"] == b"text/javascript" and h[b"vary"] == b"Accept-Encoding", h
+    assert h[b"etag"].endswith(b'-gz"'), h
+    code, h, body = get_ae(b"Accept-Encoding: gzip, br\r\n")
+    assert code == 200 and body == br and h[b"content-encoding"] == b"br" and h[b"etag"].endswith(b'-br"'), (code, h)
+    code, h, body = get_ae(b"Accept-Encoding: gzip;q=0, br;q=0\r\n")
+    assert code == 200 and body == raw and b"content-encoding" not in h, (code, h)
+
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nRange: bytes=0-9\r\nConnection: close\r\n\r\n")
+    code, h, body = read_response(f)
+    s.close()
+    assert code == 206 and body == raw[0:10] and b"content-encoding" not in h, (code, h)
+
+    _, h, _ = get_ae(b"Accept-Encoding: gzip\r\n")
+    vetag = h[b"etag"]
+    s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nIf-None-Match: " + vetag + b"\r\nConnection: close\r\n\r\n")
+    code, h304, _ = read_response(f, skip_body=True)
+    assert code == 304 and h304[b"etag"] == vetag and f.read() == b"", (code, h304)
+    s.close()
+
+    with open(os.path.join(root, "clip.mp4"), "rb") as f:
+        mp4 = f.read()
+    s, f = req(port, b"GET /clip.mp4 HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n")
+    code, h, body = read_response(f)
+    s.close()
+    assert code == 200 and body == mp4 and b"content-encoding" not in h, (code, h)
+    print("  [PASS] test_static_precompressed")
 
 
 def test_db_crud(port):
@@ -571,6 +735,10 @@ def run_suite(server_bin, port, label):
             test_static_big_eagain(port, big_sha)
             test_static_security(port)
             test_static_pipeline(port)
+            test_static_conditional(port, root)
+            test_static_range(port, root)
+            test_static_range_big_eagain(port)
+            test_static_precompressed(port, root)
             test_db_crud(port)
             test_db_strings(port)
             test_fd_leak(port, proc.pid)
@@ -591,7 +759,7 @@ def run_suite(server_bin, port, label):
     test_db_2workers(server_bin, port + 50, label)
     test_db_fork_and_guard(server_bin, port + 55, label)
     test_fullstack_e2e(label)
-    print(f"=== ALL 11 FULLSTACK TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 15 FULLSTACK TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":

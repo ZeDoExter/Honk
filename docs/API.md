@@ -5,7 +5,7 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.8.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v0.9.0";   // or relative "../Honk"
 import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
 import honk.src.honk_ws.honk_ws;            // opt-in: RFC 6455 WebSockets
 import honk.src.honk_openapi.honk_openapi;  // opt-in: OpenAPI 3.1.0 + Docs UI
@@ -117,7 +117,7 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 
 ## Static files (`honk_static`) & SQLite (`sqlite/honk_sqlite`)
 
-- **Static**: `app.static_dir(prefix, root)`, `app.static_dir_cached(prefix, root, cache_ctl)` (kernel `sendfile` + automatic `ETag` / `304 Not Modified` + `Last-Modified` + media MIME rows), `app.embed(route, data, mime = "", cache_ctl = "")` (serves compile-time `embed_file(...)` bytes with FNV-1a `ETag` / `304`), `try_serve_file`, `serve_rel`, `mime_for_rel`, `http_date`.
+- **Static**: `app.static_dir(prefix, root)`, `app.static_dir_cached(prefix, root, cache_ctl)` (kernel `sendfile` + automatic `ETag` / `304 Not Modified` + `Last-Modified` + media MIME rows), `app.static_file(route, root, rel, cache_ctl = "")` (single file), `app.embed(route, data, mime = "", cache_ctl = "")` (serves compile-time `embed_file(...)` bytes with FNV-1a `ETag` / `304`), single-range `Range` → `206` / `416` + `If-Range` + `If-Modified-Since` on all three, precompressed `.br`/`.gz` sidecars (`Accept-Encoding` + `Vary`, `-br`/`-gz` ETags), `try_serve_file`, `serve_rel`, `mime_for_rel`, `http_date`, `parse_imf_date`, `parse_range`.
 - **SQLite**: `db_connect(path, schema = "")`, `app.sql_json(db, sql)` (`BOOLEAN`/`BOOL` columns auto-emit `true`/`false`), `app.sql_json_one(db, sql, id)`, `app.sql_json_one_text(db, sql, val)`, `insert_text(db, sql, text)`, `run_int(db, sql, id)`, `db_open/db_enable_wal/db_exec/db_close/db_shutdown`, `db_prepare/stmt_finalize/stmt_step/stmt_reset`, `bind_int/float/text/text_static/null`, `col_int/float/is_null/text/name`, `db_last_id/db_changes`.
 
 ## WebSockets (`import honk.src.honk_ws.honk_ws;`) & OpenAPI (`import honk.src.honk_openapi.honk_openapi;`)
