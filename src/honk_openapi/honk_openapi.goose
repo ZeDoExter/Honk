@@ -18,6 +18,7 @@ struct OpDef {
     route: const u8[:],
     summary: const u8[:],
     req_schema: const u8[:],
+    extra_json: const u8[:],
     int_params: bool,
     authed: bool,
 }
@@ -45,7 +46,7 @@ inline fn bearer_auth(s: OpenApiSpec&) {
 }
 
 fn push_op(s: OpenApiSpec&, method: const u8[:], route: const u8[:], summary: const u8[:],
-           req_schema: const u8[:], int_params: bool, authed: bool) {
+           req_schema: const u8[:], int_params: bool, authed: bool, extra_json: const u8[:] = "") {
     if s.n_ops >= 64 { return; }
     if authed { s.has_bearer = true; }
     s.ops[s.n_ops] = OpDef {
@@ -53,6 +54,7 @@ fn push_op(s: OpenApiSpec&, method: const u8[:], route: const u8[:], summary: co
         route: route,
         summary: summary,
         req_schema: req_schema,
+        extra_json: extra_json,
         int_params: int_params,
         authed: authed,
     };
@@ -73,6 +75,13 @@ inline fn op_body(s: OpenApiSpec&, method: const u8[:], route: const u8[:], summ
 
 inline fn op_auth(s: OpenApiSpec&, method: const u8[:], route: const u8[:], summary: const u8[:]) {
     push_op(s, method, route, summary, "", false, true);
+}
+
+// Operation with a raw JSON fragment spliced before `responses`
+// (query/header/response schemas, examples: `"parameters":[...]`).
+// The fragment must be valid pre-serialized JSON (no leading comma).
+inline fn op_raw(s: OpenApiSpec&, method: const u8[:], route: const u8[:], summary: const u8[:], fragment: const u8[:]) {
+    push_op(s, method, route, summary, "", false, false, fragment);
 }
 
 // Convert Honk route (`/users/:id`, `/files/*`) into OpenAPI path (`/users/{id}`, `/files/{path}`).
@@ -176,6 +185,10 @@ fn emit_single_op(d: OpDef&, out: u8[>..]&) {
     if d.authed {
         out.append(",\"security\":[{\"bearerAuth\":[]}]");
     }
+    if d.extra_json.len > 0 {
+        out.push(',');
+        out.append(d.extra_json);
+    }
     if d.method == "POST" {
         out.append(",\"responses\":{\"201\":{\"description\":\"Created\"},\"200\":{\"description\":\"OK\"}}");
     } else if d.method == "DELETE" {
@@ -250,7 +263,7 @@ inline fn openapi_run<F>(s: OpenApiSpec&) {
 inline fn openapi<F>(app: Ctx&, route: const u8[:], title: const u8[:], version: const u8[:]) {
     app.get(route) {
         let empty_s: const u8[:] = if false { app.tmp[..0] } else { "" };
-        let empty_op = OpDef { method: empty_s, route: empty_s, summary: empty_s, req_schema: empty_s, int_params: false, authed: false };
+        let empty_op = OpDef { method: empty_s, route: empty_s, summary: empty_s, req_schema: empty_s, extra_json: empty_s, int_params: false, authed: false };
         var spec = OpenApiSpec {
             title: title,
             version: version,
@@ -277,14 +290,18 @@ inline fn append_html_escaped(out: u8[>..]&, s: const u8[:]) {
 }
 
 // Serve an interactive Scalar API Reference UI at `route` (e.g. `app.docs("/docs", "/openapi.json", "My API")`).
-inline fn docs(app: Ctx&, route: const u8[:], spec_url: const u8[:], title: const u8[:] = "API Reference") {
+// `cdn_url` defaults to jsDelivr; self-host it for offline/air-gapped deployments.
+inline fn docs(app: Ctx&, route: const u8[:], spec_url: const u8[:], title: const u8[:] = "API Reference",
+               cdn_url: const u8[:] = "https://cdn.jsdelivr.net/npm/@scalar/api-reference") {
     app.get(route) {
         let start = app.res.len;
         app.res.append("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
         append_html_escaped(app.res, title);
         app.res.append("</title></head><body><script id=\"api-reference\" data-url=\"");
         append_html_escaped(app.res, spec_url);
-        app.res.append("\"></script><script src=\"https://cdn.jsdelivr.net/npm/@scalar/api-reference\"></script></body></html>");
+        app.res.append("\"></script><script src=\"");
+        append_html_escaped(app.res, cdn_url);
+        app.res.append("\"></script></body></html>");
         app.set_header("Cache-Control", "public, max-age=300");
         app.html(200, app.res[start..]);
     };
