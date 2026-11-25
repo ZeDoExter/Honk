@@ -154,6 +154,27 @@ int64_t hsql_col_bytes(uint64_t st_h, int32_t idx) {
     return (int64_t)sqlite3_column_bytes((sqlite3_stmt *)(uintptr_t)st_h, (int)idx);
 }
 
+int32_t hsql_col_count(uint64_t st_h) {
+    if (!st_h) return -1;
+    return (int32_t)sqlite3_column_count((sqlite3_stmt *)(uintptr_t)st_h);
+}
+
+int32_t hsql_col_type(uint64_t st_h, int32_t idx) {
+    if (!st_h || idx < 0) return -1;
+    return (int32_t)sqlite3_column_type((sqlite3_stmt *)(uintptr_t)st_h, (int)idx);
+}
+
+/* Append the column's name once into the caller's builder. Returns bytes
+ * appended, or -1 on misuse. */
+int64_t hsql_col_name(uint64_t st_h, int32_t idx, gs_rref out) {
+    if (!st_h || idx < 0) return -1;
+    const char *name = sqlite3_column_name((sqlite3_stmt *)(uintptr_t)st_h, (int)idx);
+    if (!name) return -1;
+    int64_t n = (int64_t)strlen(name);
+    if (n > 0) honk_rref_append(out, name, n);
+    return n;
+}
+
 /* Append the column's text bytes once into the caller's builder. The returned
  * slice (builder range) is valid for the whole request scope. Returns the
  * number of bytes appended, or -1 on misuse. */

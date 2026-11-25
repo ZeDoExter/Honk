@@ -12,6 +12,8 @@
 // (after ALL workers joined, main thread) db_shutdown() for LSan-clean exit.
 
 import std;
+import json;
+import honk_ctx.honk_ctx;
 
 extern fn hsql_open(path: const u8[:], flags: i32) -> u64;
 extern fn hsql_close(db: u64) -> i32;
@@ -31,6 +33,9 @@ extern fn hsql_col_float(st: u64, idx: i32) -> f64;
 extern fn hsql_col_is_null(st: u64, idx: i32) -> i32;
 extern fn hsql_col_bytes(st: u64, idx: i32) -> i64;
 extern fn hsql_col_text(st: u64, idx: i32, out: u8[>..]&) -> i64;
+extern fn hsql_col_count(st: u64) -> i32;
+extern fn hsql_col_type(st: u64, idx: i32) -> i32;
+extern fn hsql_col_name(st: u64, idx: i32, out: u8[>..]&) -> i64;
 extern fn hsql_last_id(db: u64) -> i64;
 extern fn hsql_changes(db: u64) -> i64;
 extern fn hsql_errcode(db: u64) -> i32;
@@ -144,3 +149,167 @@ fn col_text(st: Stmt&, idx: i32, out: u8[>..]&) -> const u8[:], bool {
 fn db_last_id(db: Db&) -> i64 { hsql_last_id(db.h) }
 
 fn db_changes(db: Db&) -> i64 { hsql_changes(db.h) }
+
+// sqlite3_column_type() codes (mirrors sqlite3.h).
+let COL_INT: i32 = 1;
+let COL_FLOAT: i32 = 2;
+let COL_TEXT: i32 = 3;
+let COL_BLOB: i32 = 4;
+let COL_NULL: i32 = 5;
+
+// One-shot integer-param mutation: prepare -> bind -> step -> finalize.
+// Returns affected rows; ok=false on any failure. Injection-proof.
+fn run_int(db: Db&, sql: const u8[:], id: i64) -> i64, bool {
+    let st, ok = db_prepare(db, sql);
+    if !ok { return 0, false; }
+    let done = hsql_bind_int(st.h, 1, id) == 0 && hsql_step(st.h) == DONE;
+    let n = if done { hsql_changes(db.h) } else { 0 };
+    hsql_finalize(st.h);
+    return n, done;
+}
+
+// One-shot single-text insert: returns last_insert_rowid on success.
+fn insert_text(db: Db&, sql: const u8[:], text: const u8[:]) -> i64, bool {
+    let st, ok = db_prepare(db, sql);
+    if !ok { return 0, false; }
+    let done = hsql_bind_text(st.h, 1, text, 1) == 0 && hsql_step(st.h) == DONE;
+    let id = if done { hsql_last_id(db.h) } else { 0 };
+    hsql_finalize(st.h);
+    return id, done;
+}
+
+// Column name into scratch; the range is valid for the request scope.
+fn col_name(st: Stmt&, idx: i32, out: u8[>..]&) -> const u8[:], bool {
+    let start = out.len;
+    let n = hsql_col_name(st.h, idx, out);
+    if n < 0 { return "", false; }
+    return out[start..], true;
+}
+
+// One row -> {"col":val,...} appended to stream (names/texts via scratch).
+// BLOB columns fail the row (no JSON representation; loud, not silent).
+fn row_to_json(app: honk::Ctx&, st: Stmt&, stream: u8[>..]&) -> bool {
+    let ncols = hsql_col_count(st.h);
+    if ncols < 0 { return false; }
+    stream.push('{');
+    var i: i32 = 0;
+    while i < ncols {
+        if i > 0 { stream.push(','); }
+        let nm, nok = col_name(st, i, app.dstr);
+        if !nok { return false; }
+        json::format_key(stream, nm);
+        let ty = hsql_col_type(st.h, i);
+        if ty == COL_INT {
+            json::format_int(stream, hsql_col_int(st.h, i));
+        } else if ty == COL_FLOAT {
+            json::format_number(stream, hsql_col_float(st.h, i));
+        } else if ty == COL_TEXT {
+            let sstart = app.dstr.len;
+            let n = hsql_col_text(st.h, i, app.dstr);
+            if n < 0 { return false; }
+            json::format_string(stream, app.dstr[sstart..]);
+        } else if ty == COL_NULL {
+            stream.append("null");
+        } else {
+            return false;
+        }
+        i++;
+    }
+    stream.push('}');
+    return true;
+}
+
+// SELECT -> JSON array, streamed with zero heap copies. Stages 200 on
+// success (even `[]`), 500 on any failure (never partial garbage: rows
+// assemble in scratch, then move to the response builder exactly once).
+inline fn sql_json(app: honk::Ctx&, db: Db&, sql: const u8[:]) {
+    let st, ok = db_prepare(db, sql);
+    if !ok {
+        app.json_error(500, "query failed");
+        return;
+    }
+    let start = app.tmp.len;
+    app.tmp.push('[');
+    var first = true;
+    var failed = false;
+    var rc = stmt_step(st);
+    while rc == ROW {
+        if !first { app.tmp.push(','); }
+        first = false;
+        if !row_to_json(app, st, app.tmp) { failed = true; break; }
+        rc = stmt_step(st);
+    }
+    if rc != DONE { failed = true; }
+    stmt_finalize(st);
+    if failed {
+        app.json_error(500, "query failed");
+    } else {
+        app.tmp.push(']');
+        let rstart = app.res.len;
+        app.res.append(app.tmp[start..]);
+        app.json_raw(200, app.res[rstart..]);
+    }
+}
+
+// SELECT ... WHERE id = ? (one INTEGER param) -> single object, 404 if empty.
+// Extra rows are ignored (first wins); pass LIMIT 1 to be explicit.
+inline fn sql_json_one(app: honk::Ctx&, db: Db&, sql: const u8[:], id: i64) {
+    let st, ok = db_prepare(db, sql);
+    if !ok || hsql_bind_int(st.h, 1, id) != 0 {
+        if ok { stmt_finalize(st); }
+        app.json_error(500, "query failed");
+        return;
+    }
+    let rc = stmt_step(st);
+    if rc == ROW {
+        let start = app.tmp.len;
+        let good = row_to_json(app, st, app.tmp);
+        let tail = stmt_step(st);
+        stmt_finalize(st);
+        if !good || (tail != DONE && tail != ROW) {
+            app.json_error(500, "query failed");
+            return;
+        }
+        let rstart = app.res.len;
+        app.res.append(app.tmp[start..]);
+        app.json_raw(200, app.res[rstart..]);
+    } else {
+        stmt_finalize(st);
+        if rc == DONE {
+            app.json_error(404, "not found");
+        } else {
+            app.json_error(500, "query failed");
+        }
+    }
+}
+
+// sql_json_one with a single TEXT param (transient bind: always safe).
+inline fn sql_json_one_text(app: honk::Ctx&, db: Db&, sql: const u8[:], val: const u8[:]) {
+    let st, ok = db_prepare(db, sql);
+    if !ok || hsql_bind_text(st.h, 1, val, 1) != 0 {
+        if ok { stmt_finalize(st); }
+        app.json_error(500, "query failed");
+        return;
+    }
+    let rc = stmt_step(st);
+    if rc == ROW {
+        let start = app.tmp.len;
+        let good = row_to_json(app, st, app.tmp);
+        let tail = stmt_step(st);
+        stmt_finalize(st);
+        if !good || (tail != DONE && tail != ROW) {
+            app.json_error(500, "query failed");
+            return;
+        }
+        let rstart = app.res.len;
+        app.res.append(app.tmp[start..]);
+        app.json_raw(200, app.res[rstart..]);
+    } else {
+        stmt_finalize(st);
+        if rc == DONE {
+            app.json_error(404, "not found");
+        } else {
+            app.json_error(500, "query failed");
+        }
+    }
+}

@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -205,12 +206,34 @@ def test_db_crud(port):
         out = read_response(f)
         s.close()
         return out
+    # Empty table -> sql_json yields [].
+    s, f = req(port, b"GET /db/all HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, body = read_response(f)
+    assert code == 200 and body == b"[]", (code, body)
+    s.close()
     code, _, body = post(b'{"name":"alice","age":30}')
     assert code == 201, (code, body)
     rid = pyjson.loads(body)["id"]
     s, f = req(port, f"GET /db?id={rid} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
     code, _, body = read_response(f)
     assert code == 200 and pyjson.loads(body) == {"id": rid, "name": "alice", "age": 30}, (code, body)
+    s.close()
+    # sql_json + sql_json_one_text coverage.
+    s, f = req(port, b"GET /db/all HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, body = read_response(f)
+    assert code == 200 and pyjson.loads(body) == [{"id": rid, "name": "alice", "age": 30}], (code, body)
+    s.close()
+    s, f = req(port, b"GET /db/by-name?name=alice HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, body = read_response(f)
+    assert code == 200 and pyjson.loads(body) == {"id": rid, "name": "alice", "age": 30}, (code, body)
+    s.close()
+    s, f = req(port, b"GET /db/by-name?name=missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, _ = read_response(f)
+    assert code == 404, code
+    s.close()
+    s, f = req(port, b"GET /db/by-name HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, _ = read_response(f)
+    assert code == 400, code
     s.close()
     s = socket.create_connection(("127.0.0.1", port), timeout=5.0)
     payload = b'{"name":"ally","age":31}'
@@ -271,6 +294,19 @@ def test_db_strings(port):
         got = pyjson.loads(body)
         assert code == 200 and got["name"] == name, (rid, got)
         s.close()
+        q = urllib.parse.quote(name, safe="")
+        s, f = req(port, f"GET /db/by-name?name={q} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+        code, _, body = read_response(f)
+        got = pyjson.loads(body)
+        assert code == 200 and got == {"id": rid, "name": name, "age": len(name)}, (rid, got)
+        s.close()
+    s, f = req(port, b"GET /db/all HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    code, _, body = read_response(f)
+    all_rows = pyjson.loads(body)
+    s.close()
+    got_by_id = {r["id"]: r["name"] for r in all_rows}
+    for rid, name in ids:
+        assert got_by_id.get(rid) == name, (rid, name, got_by_id)
     print("  [PASS] test_db_strings")
 
 

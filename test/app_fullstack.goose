@@ -7,11 +7,9 @@
 import std;
 import os;
 import json;
-import honk_net from "../src/honk_net";
-import honk_ctx from "../src/honk_ctx";
-import honk_serve from "../src/honk_serve";
-import honk_static from "../src/honk_static";
-import honk_sqlite from "../src/honk_sqlite";
+import honk from "../src";
+import honk.honk_sqlite.honk_sqlite;
+
 struct P5WorkerCfg {
     port: i32,
     worker_id: i32,
@@ -61,10 +59,9 @@ thread_fn p5_worker(cfg: P5WorkerCfg) {
     guard dbok else { abort("db_open failed"); }
     guard db_enable_wal(db) else { abort("wal setup failed"); }
     let st_ins, iok = db_prepare(db, "INSERT INTO kv(name, age) VALUES (?1, ?2);");
-    let st_get, gok = db_prepare(db, "SELECT name, age FROM kv WHERE id = ?1;");
     let st_upd, uok = db_prepare(db, "UPDATE kv SET name = ?1, age = ?2 WHERE id = ?3;");
     let st_del, dok = db_prepare(db, "DELETE FROM kv WHERE id = ?1;");
-    guard iok && gok && uok && dok else { abort("prepare failed"); }
+    guard iok && uok && dok else { abort("prepare failed"); }
 
     honk::serve() { fd, date =>
         honk::request(fd, date) { ctx =>
@@ -96,46 +93,28 @@ thread_fn p5_worker(cfg: P5WorkerCfg) {
                 if !rok {
                     ctx.json_error(400, "missing id");
                 } else {
-                    let id, iok2 = parse_i64_strict(raw);
+                    let id, iok2 = honk::parse_i64_strict(raw);
                     if !iok2 || id <= 0 {
                         ctx.json_error(400, "bad id");
-                    } else if !bind_int(st_get, 1, id) {
-                        stmt_reset(st_get);
-                        ctx.json_error(500, "bind failed");
                     } else {
-                        let rc = stmt_step(st_get);
-                        if rc == ROW {
-                            let nm, nok = col_text(st_get, 0, ctx.tmp);
-                            let age = col_int(st_get, 1);
-                            stmt_reset(st_get);
-                            if !nok {
-                                ctx.json_error(500, "read failed");
-                            } else {
-                                ctx.res.append("{\"id\":");
-                                format(ctx.res, id);
-                                ctx.res.append(",\"name\":");
-                                json::format_string(ctx.res, nm);
-                                ctx.res.append(",\"age\":");
-                                format(ctx.res, age);
-                                ctx.res.push('}');
-                                ctx.json_raw(200, ctx.res[..]);
-                            }
-                        } else {
-                            stmt_reset(st_get);
-                            if rc == DONE {
-                                ctx.json_error(404, "not found");
-                            } else {
-                                ctx.json_error(500, "select failed");
-                            }
-                        }
+                        ctx.sql_json_one(db, "SELECT id, name, age FROM kv WHERE id = ?1;", id);
                     }
+                }
+            } else if ctx.method == "GET" && ctx.path == "/db/all" {
+                ctx.sql_json(db, "SELECT id, name, age FROM kv ORDER BY id;");
+            } else if ctx.method == "GET" && ctx.path == "/db/by-name" {
+                let nm, nok = ctx.query_decoded("name");
+                if !nok || nm.len == 0 {
+                    ctx.json_error(400, "missing name");
+                } else {
+                    ctx.sql_json_one_text(db, "SELECT id, name, age FROM kv WHERE name = ?1 ORDER BY id LIMIT 1;", nm);
                 }
             } else if ctx.method == "PUT" && ctx.path == "/db" {
                 let raw, rok = ctx.query("id");
                 if !rok {
                     ctx.json_error(400, "missing id");
                 } else {
-                    let id, iok3 = parse_i64_strict(raw);
+                    let id, iok3 = honk::parse_i64_strict(raw);
                     var u = DbUser { name: "", .. };
                     var r = json::reader(ctx.body);
                     if !iok3 || id <= 0 || !parse_dbuser(r, ctx.tmp, u) || u.name.len == 0 {
@@ -159,7 +138,7 @@ thread_fn p5_worker(cfg: P5WorkerCfg) {
                 if !rok {
                     ctx.json_error(400, "missing id");
                 } else {
-                    let id, iok4 = parse_i64_strict(raw);
+                    let id, iok4 = honk::parse_i64_strict(raw);
                     if !iok4 || id <= 0 {
                         ctx.json_error(400, "bad id");
                     } else if !bind_int(st_del, 1, id) {
@@ -185,7 +164,6 @@ thread_fn p5_worker(cfg: P5WorkerCfg) {
     };
 
     stmt_finalize(st_ins);
-    stmt_finalize(st_get);
     stmt_finalize(st_upd);
     stmt_finalize(st_del);
     db_close(db);
