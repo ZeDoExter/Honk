@@ -671,6 +671,38 @@ fn main() {
     assert(bok && back == 784111777);
     let _, bad_dt = parse_imf_date("yesterday");
     assert(!bad_dt);
+    // 13. v0.10.0: unified 128-bit CIDR + v6 XFF walk + bracketed Host
+    let nets6, nok6 = honk::parse_cidrs("::1,2001:db8::/32,fc00::/7,10.0.0.0/8,[fe80::1]/128");
+    assert(nok6 && nets6.n == 5);
+    let h1, l1, ok1 = honk::parse_ip("::1");
+    assert(ok1 && h1 == 0 && l1 == 1 && honk::ip_in_nets(h1, l1, nets6));
+    let h2, l2, ok2 = honk::parse_ip("2001:db8::99");
+    assert(ok2 && honk::ip_in_nets(h2, l2, nets6));
+    let h3, l3, ok3 = honk::parse_ip("2001:db9::1");
+    assert(ok3 && !honk::ip_in_nets(h3, l3, nets6));
+    let h4, l4, ok4 = honk::parse_ip("10.9.9.9");
+    assert(ok4 && honk::ip_in_nets(h4, l4, nets6));
+    let h5, l5, ok5 = honk::parse_ip("11.0.0.1");
+    assert(ok5 && !honk::ip_in_nets(h5, l5, nets6));
+    let h6, l6, ok6 = honk::parse_ip("[::1]:8080");
+    assert(ok6 && h6 == 0 && l6 == 1);
+    let h7, l7, ok7 = honk::parse_ip("::ffff:10.1.2.3");
+    assert(ok7 && honk::ip_in_nets(h7, l7, nets6));
+    let _, _, bad1 = honk::parse_ip("1::2::3");
+    assert(!bad1);
+    let _, _, bad2 = honk::parse_ip("unix");
+    assert(!bad2);
+
+    // v6 hops in the right-to-left walk (peer 127.0.0.1 trusted via /proxy-ip nets)
+    t.get_headers("/proxy-ip/via", "X-Forwarded-For: 2001:db8::9, 10.0.0.5\r\n") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "2001:db8::9");
+    t.get_headers("/proxy-ip/via", "X-Forwarded-For: [2001:db8::9]\r\n") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "[2001:db8::9]");
+
+    // Bracketed IPv6 Host never confuses routing (Host is not parsed for ports)
+    t.req("GET", "/ping", "Host: [::1]:18080\r\n", "") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "pong");
+
 
 
     // 10. 10,000 in-memory requests loop + rate-table cleanup for LSan
