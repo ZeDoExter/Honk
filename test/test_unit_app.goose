@@ -4,9 +4,13 @@
 //  - v0.5.0 NIST SHA-256 & RFC 4231 HMAC-SHA256 vectors, HS256 JWT issue/verify/guard,
 //    signed cookies + cross-cookie swap protection + delete_cookie, compile-time
 //    embed_file() + ETag/304 Not Modified, real_ip() + rate_limit() (429 + Retry-After).
+//  - v0.8.0 hardening: trusted proxies (right-to-left XFF walk), cors_cfg, request_id +
+//    access_log, 8 route params, 16 response headers, float validators, op_raw, self-host
+//    docs, in-memory static capture, completed status texts + MIME + Last-Modified.
 
 import std;
 import honk from "..";
+import honk.src.honk_static.honk_static;
 import honk.src.honk_test.honk_test;
 import honk.src.honk_auth.honk_auth;
 import honk.src.honk_ws.honk_ws;
@@ -20,6 +24,16 @@ fn hex_encode(bytes: const u8[:], out: u8[>..]&) -> const u8[:] {
         out.push(hx[(b & 15) as! i64]);
     }
     return out[s..];
+}
+fn has_sub(hay: const u8[:], needle: const u8[:]) -> bool {
+    if needle.len == 0 { return true; }
+    if needle.len > hay.len { return false; }
+    var i: i64 = 0;
+    while i + needle.len <= hay.len {
+        if hay[i..i + needle.len] == needle { return true; }
+        i++;
+    }
+    return false;
 }
 
 fn verify_crypto_vectors() {
@@ -118,6 +132,56 @@ fn api_routes(app: honk::Ctx&) {
             app.ok(app.real_ip_trusted(nets));
         };
     };
+
+    app.get("/p8/:a/:b/:c/:d/:e/:f") {
+        app.json() { j =>
+            j.set("a", app.param("a"));
+            j.set("b", app.param("b"));
+            j.set("c", app.param("c"));
+            j.set("d", app.param("d"));
+            j.set("e", app.param("e"));
+            j.set("f", app.param("f"));
+            j.set("last_idx", app.param(5));
+        };
+    };
+
+    app.get("/hdrs12") {
+        app.set_header("X-H01", "1");
+        app.set_header("X-H02", "2");
+        app.set_header("X-H03", "3");
+        app.set_header("X-H04", "4");
+        app.set_header("X-H05", "5");
+        app.set_header("X-H06", "6");
+        app.set_header("X-H07", "7");
+        app.set_header("X-H08", "8");
+        app.set_header("X-H09", "9");
+        app.set_header("X-H10", "10");
+        app.set_header("X-H11", "11");
+        app.set_header("X-H12", "12");
+        app.ok("h");
+    };
+
+    app.post("/validate-f") {
+        app.require_float("price") { price =>
+            app.require_float_range("ratio", 0.0, 1.0) { ratio =>
+                app.created_json() { j =>
+                    j.set("price", price);
+                    j.set("ratio", ratio);
+                };
+            };
+        };
+    };
+
+    app.get("/rid") {
+        app.ok(app.request_id());
+    };
+
+    app.get("/logged") {
+        app.access_log();
+        app.ok("logged");
+    };
+
+    app.static_dir("/st", "test/static_fixtures");
 
     app.group("/api") {
         app.get("/", "api-index");
@@ -251,14 +315,25 @@ fn api_routes(app: honk::Ctx&) {
         spec.op_body("POST", "/todos", "Create todo", "{\"type\":\"object\"}");
         spec.op_int("PATCH", "/todos/:id/toggle", "Toggle todo");
         spec.op_auth("DELETE", "/todos/:id", "Delete todo");
+        spec.op_raw("GET", "/todos/search", "Search todos", "\"parameters\":[{\"name\":\"q\",\"in\":\"query\"}]");
     };
     app.docs("/docs", "/openapi.json", "Unit API <Docs>");
+    app.docs("/docs-self", "/openapi.json", "Unit API", "https://cdn.internal/scalar.js");
 
     app.after() {
         let start = app.tmp.len;
         format(app.tmp, app.status);
         app.set_header("X-Final-Status", app.tmp[start..]);
     };
+}
+fn cfg_routes(app: honk::Ctx&) {
+    app.cors_cfg("https://a.example, https://b.example", "GET, POST", "Content-Type", 600, true);
+    app.get("/cfg", "cfg-ok");
+}
+
+fn cfg_star_routes(app: honk::Ctx&) {
+    app.cors_cfg("*", "GET", "Content-Type", 0, true);
+    app.get("/cfg", "cfg-ok");
 }
 
 fn main() {
@@ -481,6 +556,81 @@ fn main() {
 
     t.get("/docs") { app => api_routes(app); };
     assert(t.status == 200 && t.ctype() == "text/html" && t.body().len > 150);
+    // 11. v0.8.0 hardening: status texts, CIDR/IPv4, 8 params, 16 headers,
+    //     cors_cfg, float validators, request_id, op_raw, self-host docs, static capture
+    assert(honk::status_text(206) == "Partial Content");
+    assert(honk::status_text(413) == "Payload Too Large");
+    assert(honk::status_text(416) == "Range Not Satisfiable");
+    assert(honk::status_text(431) == "Request Header Fields Too Large");
+    assert(honk::status_text(501) == "Not Implemented");
+    assert(honk::status_text(503) == "Service Unavailable");
+
+    let nets_t, nok_t = honk::parse_cidrs("127.0.0.1,10.0.0.0/8");
+    assert(nok_t && nets_t.n == 2);
+    let _, bad_ok = honk::parse_cidrs("999.1.1.1,xx");
+    assert(!bad_ok);
+    let ip4, ip4ok = honk::parse_ipv4("192.168.1.1");
+    assert(ip4ok && ip4 == 3232235777);
+    let _, ip4bad = honk::parse_ipv4("1.2.3.256");
+    assert(!ip4bad);
+
+    t.get("/p8/1/2/3/4/5/6") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "{\"a\":\"1\",\"b\":\"2\",\"c\":\"3\",\"d\":\"4\",\"e\":\"5\",\"f\":\"6\",\"last_idx\":\"6\"}");
+
+    t.get("/hdrs12") { app => api_routes(app); };
+    let h01, h01ok = t.header("X-H01");
+    let h12, h12ok = t.header("X-H12");
+    assert(t.status == 200 && h01ok && h01 == "1" && h12ok && h12 == "12");
+
+    t.get_headers("/cfg", "Origin: https://b.example\r\n") { app => cfg_routes(app); };
+    let c_ao, c_ao_ok = t.header("Access-Control-Allow-Origin");
+    let c_vary, c_vary_ok = t.header("Vary");
+    let c_cred, c_cred_ok = t.header("Access-Control-Allow-Credentials");
+    let c_ma, c_ma_ok = t.header("Access-Control-Max-Age");
+    assert(t.status == 200 && c_ao_ok && c_ao == "https://b.example" && c_vary_ok && c_vary == "Origin");
+    assert(c_cred_ok && c_cred == "true" && c_ma_ok && c_ma == "600");
+
+    t.get_headers("/cfg", "Origin: https://evil.example\r\n") { app => cfg_routes(app); };
+    let _, eao_ok = t.header("Access-Control-Allow-Origin");
+    let e_vary, e_vary_ok = t.header("Vary");
+    assert(t.status == 200 && !eao_ok && e_vary_ok && e_vary == "Origin");
+
+    t.req("OPTIONS", "/cfg", "Origin: https://a.example\r\n", "") { app => cfg_routes(app); };
+    assert(t.status == 204);
+
+    t.get_headers("/cfg", "Origin: https://x.example\r\n") { app => cfg_star_routes(app); };
+    let s_ao, s_ao_ok = t.header("Access-Control-Allow-Origin");
+    let _, s_cred_ok = t.header("Access-Control-Allow-Credentials");
+    assert(s_ao_ok && s_ao == "*" && !s_cred_ok);
+
+    t.post_json("/validate-f", "{\"price\":9.5,\"ratio\":0.25}") { app => api_routes(app); };
+    assert(t.status == 201 && t.body() == "{\"price\":9.5,\"ratio\":0.25}");
+    t.post_json("/validate-f", "{\"price\":\"9\",\"ratio\":0.5}") { app => api_routes(app); };
+    assert(t.status == 400);
+    t.post_json("/validate-f", "{\"price\":9.5,\"ratio\":7.0}") { app => api_routes(app); };
+    assert(t.status == 400 && t.body() == "{\"error\":\"out of range: ratio\"}");
+
+    t.get_headers("/rid", "X-Request-Id: req-123_abc:1.2\r\n") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "req-123_abc:1.2");
+    t.get_headers("/rid", "X-Request-Id: bad id!\r\n") { app => api_routes(app); };
+    assert(t.status == 200 && t.body()[..1] == "w");
+    t.get("/rid") { app => api_routes(app); };
+    assert(t.status == 200 && t.body()[..1] == "w");
+
+    t.get("/logged") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "logged");
+
+    t.get("/openapi.json") { app => api_routes(app); };
+    assert(has_sub(t.body(), "\"/todos/search\"") && has_sub(t.body(), "\"parameters\":[{\"name\":\"q\",\"in\":\"query\"}]"));
+
+    t.get("/docs-self") { app => api_routes(app); };
+    assert(t.status == 200 && has_sub(t.body(), "https://cdn.internal/scalar.js"));
+
+    t.get("/st/index.html") { app => api_routes(app); };
+    let st_etag, st_etag_ok = t.header("ETag");
+    let st_lm, st_lm_ok = t.header("Last-Modified");
+    let st_cl, st_cl_ok = t.header("Content-Length");
+    assert(t.status == 200 && st_etag_ok && st_lm_ok && st_cl_ok && st_cl.len > 0);
 
     // 10. 10,000 in-memory requests loop + rate-table cleanup for LSan
     for _ in 10000 {
@@ -489,5 +639,5 @@ fn main() {
     }
     honk_rate_reset();
 
-    print("ALL IN-MEMORY UNIT + AUTH + EMBED + RATE-LIMIT + STREAM + FORM + WS + OPENAPI TESTS PASSED");
+    print("ALL IN-MEMORY UNIT + AUTH + EMBED + RATE-LIMIT + STREAM + FORM + WS + OPENAPI + V0.8.0 HARDENING TESTS PASSED");
 }
