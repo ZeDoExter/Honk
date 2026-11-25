@@ -38,10 +38,12 @@
 #include <string.h>
 #include <strings.h>
 #include <limits.h>
+#include <stddef.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -143,6 +145,12 @@ static int32_t g_is_fork_parent = 0;
 static int32_t g_num_children = 0;
 static pid_t g_parent_pid = 0;
 static pid_t g_child_pids[HONK_MAX_WORKERS];
+/* Explicit bind spec from honk_set_bind ("", $HONK_BIND fallback, or "::"). */
+static char g_bind_spec[256] = {0};
+/* Pre-fork Unix listener: bound once in the parent, accept4()ed by all. */
+static char g_unix_path[108] = {0};
+static int g_unix_listen_fd = -1;
+static pid_t g_unix_owner_pid = 0;
 
 static void honk_sig_handler(int sig) {
     if (sig == SIGINT) {
@@ -371,6 +379,128 @@ void honk_set_timeouts(int32_t idle_timeout_ms, int32_t header_timeout_ms) {
     tls_header_timeout_ms = header_timeout_ms;
 }
 
+static const char *honk_resolve_bind(void) {
+    if (g_bind_spec[0] != '\0') return g_bind_spec;
+    const char *env = getenv("HONK_BIND");
+    if (env && env[0] != '\0') return env;
+    return "::";
+}
+
+void honk_set_bind(sl_u8_shim spec) {
+    size_t n = (size_t)spec.len < sizeof(g_bind_spec) - 1
+        ? (size_t)spec.len : sizeof(g_bind_spec) - 1;
+    memcpy(g_bind_spec, spec.data, n);
+    g_bind_spec[n] = '\0';
+}
+
+/* Bind+listen a Unix socket path (stale S_ISSOCK files unlinked, regular
+ * files never touched; 0660 perms). Idempotent for the same live path. */
+static int honk_unix_bind_inner(const char *path) {
+    if (!path || !path[0]) return -1;
+    size_t plen = strlen(path);
+    if (plen >= sizeof(((struct sockaddr_un *)0)->sun_path)) return -1;
+    if (g_unix_listen_fd >= 0 && strcmp(g_unix_path, path) == 0) return 0;
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode)) return -1;
+        unlink(path);
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, plen + 1);
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + plen + 1);
+    if (bind(fd, (struct sockaddr *)&addr, alen) < 0) {
+        close(fd);
+        return -1;
+    }
+    /* NOTE: fchmod() on the fd is a no-op for socket files on Linux; the
+     * path-based chmod() below is what actually sets 0660. */
+    if (chmod(path, 0660) < 0 || listen(fd, 4096) < 0) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    if (g_unix_listen_fd >= 0) close(g_unix_listen_fd);
+    g_unix_listen_fd = fd;
+    snprintf(g_unix_path, sizeof(g_unix_path), "%s", path);
+    g_unix_owner_pid = getpid();
+    return 0;
+}
+
+int32_t honk_unix_listen(sl_u8_shim path) {
+    char buf[108];
+    if (path.len <= 0 || path.len >= (int64_t)sizeof(buf)) return -1;
+    memcpy(buf, path.data, (size_t)path.len);
+    buf[path.len] = '\0';
+    return (int32_t)honk_unix_bind_inner(buf);
+}
+
+/* Create a bound+listening TCP fd for a spec: "0.0.0.0"/"127.0.0.1" (v4),
+ * "::"/"::1"/v6-literal (v6, dual-stack unless "v6only:" prefixed).
+ * Wildcard "::" falls back to v4 on kernels without AF_INET6. */
+static int make_tcp_listener(const char *spec, int port) {
+    int v6only = 0;
+    if (strncmp(spec, "v6only:", 7) == 0) {
+        v6only = 1;
+        spec += 7;
+    }
+    int is_v6 = (strchr(spec, ':') != NULL);
+    if (!is_v6) {
+        struct in_addr a4;
+        if (inet_pton(AF_INET, spec, &a4) != 1) return -1;
+        int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        if (fd < 0) return -1;
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr = a4;
+        addr.sin_port = htons((uint16_t)port);
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+            listen(fd, 4096) < 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
+    }
+    struct in6_addr a6;
+    if (inet_pton(AF_INET6, spec, &a6) != 1) return -1;
+    int fd = socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+        if ((errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT) &&
+            IN6_IS_ADDR_UNSPECIFIED(&a6)) {
+            return make_tcp_listener("0.0.0.0", port);
+        }
+        return -1;
+    }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    int off = v6only ? 1 : 0;
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off)) < 0) {
+        close(fd);
+        return -1;
+    }
+    struct sockaddr_in6 addr6;
+    memset(&addr6, 0, sizeof(addr6));
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_addr = a6;
+    addr6.sin6_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&addr6, sizeof(addr6)) < 0 ||
+        listen(fd, 4096) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 int32_t honk_worker_init(int32_t port) {
     install_signal_handlers();
     tls_should_stop = 0;
@@ -380,26 +510,18 @@ int32_t honk_worker_init(int32_t port) {
         if (!tls_conns) return -1;
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if (fd < 0) return -1;
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons((uint16_t)port);
-
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
-    }
-    if (listen(fd, 4096) < 0) {
-        close(fd);
-        return -1;
+    /* Bind spec: explicit honk_set_bind, else $HONK_BIND, else dual-stack "::".
+     * Unix sockets reuse the pre-fork listener shared by all workers. */
+    const char *spec = honk_resolve_bind();
+    int fd = -1;
+    if (strncmp(spec, "unix:", 5) == 0) {
+        if (g_unix_listen_fd < 0 && honk_unix_bind_inner(spec + 5) < 0) {
+            return -1;
+        }
+        fd = g_unix_listen_fd;
+    } else {
+        fd = make_tcp_listener(spec, (int)port);
+        if (fd < 0) return -1;
     }
 
     int epfd = epoll_create1(0);
@@ -432,6 +554,12 @@ void honk_worker_shutdown(void) {
                 kill(g_child_pids[i], SIGTERM);
             }
         }
+    }
+    /* Unix-socket owner unlinks the path; children inherit the fd and skip.
+     * Accepted connections survive (fd-based); only new connects stop. */
+    if (g_unix_path[0] != '\0' && getpid() == g_unix_owner_pid) {
+        unlink(g_unix_path);
+        g_unix_path[0] = '\0';
     }
     if (tls_listen_fd >= 0) {
         if (tls_epfd >= 0) {
@@ -1377,6 +1505,14 @@ int32_t honk_fork_workers(int32_t n) {
         fprintf(stderr, "honk: cannot fork %d workers with an open SQLite handle; "
                         "call honk::workers() / honk::workers_env() before db_open()\n",
                 (int)n);
+        fflush(stderr);
+        _exit(1);
+    }
+    /* Unix sockets: bind once here so every forked worker accept4()s on the
+     * single shared listen fd (per-worker bind would hit EADDRINUSE). */
+    const char *bspec = honk_resolve_bind();
+    if (strncmp(bspec, "unix:", 5) == 0 && honk_unix_bind_inner(bspec + 5) < 0) {
+        fprintf(stderr, "honk: cannot bind unix socket '%s'\n", bspec + 5);
         fflush(stderr);
         _exit(1);
     }

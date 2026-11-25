@@ -90,8 +90,22 @@ fn workers_env() -> i32 {
 }
 
 // Server on `main`: 1 worker by default, or N SO_REUSEPORT workers via
-// $HONK_WORKERS (or a prior honk::workers() call).
+// $HONK_WORKERS (or a prior honk::workers() call). Binds $HONK_BIND when set,
+// else dual-stack `::` (see `listen_at` for spec forms).
 fn listen<F>(port: i32) {
+    honk_fork_env();
+    honk_set_timeouts(30000, 10000);
+    guard honk_worker_init(port) == 0 else { abort("honk_worker_init failed"); }
+    serve() { fd, date =>
+        request_app(fd, date) { app => F(app); };
+    };
+    honk_fork_join();
+}
+// listen() on an explicit bind spec: "0.0.0.0", "127.0.0.1", "::", "::1",
+// any IPv4/IPv6 literal, "v6only:::" for v6-only, or "unix:/path/to.sock"
+// (pre-bound pre-fork, shared accept4, owner-only unlink on shutdown).
+fn listen_at<F>(bind_spec: const u8[:], port: i32) {
+    honk_set_bind(bind_spec);
     honk_fork_env();
     honk_set_timeouts(30000, 10000);
     guard honk_worker_init(port) == 0 else { abort("honk_worker_init failed"); }

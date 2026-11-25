@@ -17,6 +17,8 @@ struct RawReq {
 extern fn honk_set_timeouts(idle_timeout_ms: i32, header_timeout_ms: i32);
 extern fn honk_worker_init(port: i32) -> i32;
 extern fn honk_worker_shutdown();
+extern fn honk_set_bind(spec: const u8[:]);
+extern fn honk_unix_listen(path: const u8[:]) -> i32;
 extern fn honk_wait(out_fds: i32[256]&, out_date29: u8[29]&, timeout_ms: i32) -> i32;
 extern fn honk_conn_read(fd: i32, rx_buf: u8[>..]&) -> i32;
 extern fn honk_parse_req(buf: const u8[:], out: RawReq&) -> i32;
