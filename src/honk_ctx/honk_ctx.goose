@@ -429,10 +429,12 @@ fn real_ip(c: Ctx&) -> const u8[:] {
     return c.client_ip();
 }
 // Trusted reverse-proxy networks, parsed once in `main` via `parse_cidrs`
-// and passed per request to `real_ip_trusted` (max 8 networks).
+// and passed per request to `real_ip_trusted` (max 16 entries). Unified
+// 128-bit form: IPv4 maps to ::ffff:0:0/96 (`hi == 0`, low 32 bits of `lo`).
 struct Cidrs {
-    nets: u32[8],
-    masks: u32[8],
+    nets_hi: u64[16],
+    nets_lo: u64[16],
+    bits: i64[16],
     n: i64,
 }
 
@@ -467,11 +469,192 @@ fn parse_ipv4(s: const u8[:]) -> u32, bool {
          | ((parts[2] as! u32) << 8) | (parts[3] as! u32), true;
 }
 
-// Parse `"127.0.0.1,10.0.0.0/8"` into masked networks (max 8, extras
-// dropped; bare IPs mean /32; malformed entries skipped). False when
-// nothing usable parsed.
+// Strict IPv6 parse with `::` compression and optional embedded IPv4 tail
+// (`::ffff:1.2.3.4`). No brackets (see `parse_ip`), no zone ids.
+fn parse_ipv6(s: const u8[:]) -> u64, u64, bool {
+    if s.len == 0 || s.len > 45 { return 0, 0, false; }
+    var head = s;
+    var v4: u32 = 0;
+    var has_v4 = false;
+    var dot = false;
+    for ch in s {
+        if ch == '.' { dot = true; break; }
+    }
+    if dot {
+        var lc = -1;
+        var i = s.len - 1;
+        while i >= 0 {
+            if s[i] == ':' { lc = i; break; }
+            i--;
+        }
+        if lc < 0 { return 0, 0, false; }
+        let v, vok = parse_ipv4(s[lc + 1 ..]);
+        if !vok { return 0, 0, false; }
+        v4 = v;
+        has_v4 = true;
+        head = s[..lc];
+        if head.len == 0 { return 0, 0, false; }
+    }
+    let maxw = if has_v4 { 6 } else { 8 };
+    var gap_at = -1;
+    var gi: i64 = 0;
+    while gi + 1 < head.len {
+        if head[gi] == ':' && head[gi + 1] == ':' {
+            if gap_at >= 0 { return 0, 0, false; }
+            gap_at = gi;
+            gi += 2;
+        } else {
+            gi++;
+        }
+    }
+    let lend = if gap_at < 0 { head.len } else { gap_at };
+    var groups: u64[8] = [0; 8];
+    var ng: i64 = 0;
+    if lend > 0 {
+        var p: i64 = 0;
+        loop {
+            var e = lend;
+            var k = p;
+            while k < lend {
+                if head[k] == ':' { e = k; break; }
+                k++;
+            }
+            if e == p || e - p > 4 { return 0, 0, false; }
+            var v: u64 = 0;
+            var m = p;
+            while m < e {
+                let hv = hex_val(head[m]);
+                if hv < 0 { return 0, 0, false; }
+                v = v * 16 + (hv as! u64);
+                m++;
+            }
+            if ng >= 8 { return 0, 0, false; }
+            groups[ng] = v;
+            ng++;
+            if e == lend { break; }
+            p = e + 1;
+        }
+    }
+    let nl = ng;
+    var tail: u64[8] = [0; 8];
+    var nr: i64 = 0;
+    if gap_at >= 0 && gap_at + 2 < head.len {
+        var p: i64 = gap_at + 2;
+        loop {
+            var e = head.len;
+            var k = p;
+            while k < head.len {
+                if head[k] == ':' { e = k; break; }
+                k++;
+            }
+            if e == p || e - p > 4 { return 0, 0, false; }
+            var v: u64 = 0;
+            var m = p;
+            while m < e {
+                let hv = hex_val(head[m]);
+                if hv < 0 { return 0, 0, false; }
+                v = v * 16 + (hv as! u64);
+                m++;
+            }
+            if nr >= 8 { return 0, 0, false; }
+            tail[nr] = v;
+            nr++;
+            if e == head.len { break; }
+            p = e + 1;
+        }
+    }
+    if gap_at < 0 {
+        if nl != maxw { return 0, 0, false; }
+    } else if nl + nr >= maxw {
+        return 0, 0, false;
+    }
+    var t: i64 = 0;
+    while t < nr {
+        groups[maxw - nr + t] = tail[t];
+        t++;
+    }
+    if has_v4 {
+        let vu = v4 as! u64;
+        groups[6] = (vu >> 16) & 0xffff;
+        groups[7] = vu & 0xffff;
+    }
+    let hi = (groups[0] << 48) | (groups[1] << 32) | (groups[2] << 16) | groups[3];
+    let lo = (groups[4] << 48) | (groups[5] << 32) | (groups[6] << 16) | groups[7];
+    return hi, lo, true;
+}
+
+// Parse one IP literal (v4 dotted-quad or v6, optional single `[]` brackets
+// with optional `:port`) into unified 128-bit form. v4 maps to ::ffff:0:0/96.
+// False on garbage, `"unix"`, or zone ids.
+fn parse_ip(s: const u8[:]) -> u64, u64, bool {
+    var inner = s;
+    if s.len >= 2 && s[0] == '[' {
+        var cb = -1;
+        var k: i64 = 1;
+        while k < s.len {
+            if s[k] == ']' { cb = k; break; }
+            k++;
+        }
+        if cb < 0 { return 0, 0, false; }
+        var rest = cb + 1;
+        if rest < s.len {
+            if s[rest] != ':' { return 0, 0, false; }
+            rest++;
+            if rest >= s.len { return 0, 0, false; }
+            while rest < s.len {
+                if s[rest] < '0' || s[rest] > '9' { return 0, 0, false; }
+                rest++;
+            }
+        }
+        inner = s[1..cb];
+    }
+    let v4, v4ok = parse_ipv4(inner);
+    if v4ok {
+        return 0, (0xffff00000000 as! u64) | v4, true;
+    }
+    return parse_ipv6(inner);
+}
+
+inline fn parse_cidr_bits(s: const u8[:]) -> i64, bool {
+    if s.len == 0 || s.len > 3 { return 0, false; }
+    var b: i64 = 0;
+    for ch in s {
+        if ch < '0' || ch > '9' { return 0, false; }
+        b = b * 10 + (ch - '0');
+    }
+    if b < 0 || b > 128 { return 0, false; }
+    return b, true;
+}
+
+// Mask host bits (shift-safe: never shifts by 64) and store (max 16).
+fn accept_cidr(c: Cidrs&, hi: u64, lo: u64, b: i64) {
+    if c.n >= 16 { return; }
+    var mhi = hi;
+    var mlo = lo;
+    if b <= 0 {
+        mhi = 0;
+        mlo = 0;
+    } else if b < 64 {
+        let k: u64 = (64 - b) as! u64;
+        mhi = (hi >> k) << k;
+        mlo = 0;
+    } else if b == 64 {
+        mlo = 0;
+    } else if b < 128 {
+        let k: u64 = (128 - b) as! u64;
+        mlo = (lo >> k) << k;
+    }
+    c.nets_hi[c.n] = mhi;
+    c.nets_lo[c.n] = mlo;
+    c.bits[c.n] = b;
+    c.n++;
+}
+
+// Parse `"127.0.0.1,10.0.0.0/8,::1,fc00::/7"` into masked 128-bit networks
+// (max 16, extras dropped; bare v4 = /32, bare v6 = /128; optional `[…]`
+// brackets; malformed entries skipped). False when nothing usable parsed.
 fn parse_cidrs(s: const u8[:]) -> Cidrs, bool {
-    var c = Cidrs { nets: [0; 8], masks: [0; 8], n: 0 };
+    var c = Cidrs { nets_hi: [0; 16], nets_lo: [0; 16], bits: [0; 16], n: 0 };
     var pos: i64 = 0;
     while pos <= s.len {
         var end = s.len;
@@ -485,37 +668,57 @@ fn parse_cidrs(s: const u8[:]) -> Cidrs, bool {
         var ee = end;
         while ee > es && (s[ee - 1] == ' ' || s[ee - 1] == '\t') { ee--; }
         if ee > es {
-            var slash = -1;
-            var k = es;
-            while k < ee {
-                if s[k] == '/' { slash = k; break; }
-                k++;
-            }
-            let ip_end = if slash < 0 { ee } else { slash };
-            let ip, ok = parse_ipv4(s[es..ip_end]);
-            if ok {
-                var bits: i64 = 32;
-                var bok = true;
-                if slash >= 0 {
-                    if slash + 1 >= ee { bok = false; }
-                    else {
-                        var b: i64 = 0;
-                        var m = slash + 1;
-                        while m < ee {
-                            if s[m] < '0' || s[m] > '9' { bok = false; break; }
-                            b = b * 10 + (s[m] - '0');
-                            m++;
+            var a0 = es;
+            var a1 = ee;
+            var b: i64 = -1;
+            var eok = true;
+            if s[es] == '[' {
+                var cb = -1;
+                var k = es + 1;
+                while k < ee {
+                    if s[k] == ']' { cb = k; break; }
+                    k++;
+                }
+                if cb < 0 { eok = false; }
+                else {
+                    a0 = es + 1;
+                    a1 = cb;
+                    if cb + 1 < ee {
+                        if s[cb + 1] != '/' { eok = false; }
+                        else {
+                            let pb, pok = parse_cidr_bits(s[cb + 2 .. ee]);
+                            if !pok { eok = false; } else { b = pb; }
                         }
-                        if b < 0 || b > 32 { bok = false; }
-                        else { bits = b; }
                     }
                 }
-                if bok && c.n < 8 {
-                    let sh: u32 = (32 - bits) as! u32;
-                    let mask: u32 = if bits == 0 { 0 } else { (0xffffffff as! u32) << sh };
-                    c.nets[c.n] = ip & mask;
-                    c.masks[c.n] = mask;
-                    c.n++;
+            } else {
+                var slash = -1;
+                var k = es;
+                while k < ee {
+                    if s[k] == '/' { slash = k; break; }
+                    k++;
+                }
+                if slash >= 0 {
+                    a1 = slash;
+                    let pb, pok = parse_cidr_bits(s[slash + 1 .. ee]);
+                    if !pok { eok = false; } else { b = pb; }
+                }
+            }
+            if eok {
+                let v4, v4ok = parse_ipv4(s[a0..a1]);
+                if v4ok {
+                    if b > 32 { eok = false; }
+                    else {
+                        if b < 0 { b = 32; }
+                        accept_cidr(c, 0, (0xffff00000000 as! u64) | v4, 96 + b);
+                    }
+                } else {
+                    let hi, lo, v6ok = parse_ipv6(s[a0..a1]);
+                    if !v6ok { eok = false; }
+                    else {
+                        if b < 0 { b = 128; }
+                        accept_cidr(c, hi, lo, b);
+                    }
                 }
             }
         }
@@ -525,10 +728,24 @@ fn parse_cidrs(s: const u8[:]) -> Cidrs, bool {
     return c, c.n > 0;
 }
 
-inline fn ip_in_nets(ip: u32, nets: Cidrs) -> bool {
-    let n = if nets.n <= 8 { nets.n } else { 8 };
+inline fn ip_in_nets(hi: u64, lo: u64, nets: Cidrs) -> bool {
+    let n = if nets.n <= 16 { nets.n } else { 16 };
     for i in n {
-        if (ip & nets.masks[i]) == nets.nets[i] { return true; }
+        let b = nets.bits[i];
+        if b <= 0 { return true; }
+        if b <= 64 {
+            if b < 64 {
+                let k: u64 = (64 - b) as! u64;
+                if ((hi ^ nets.nets_hi[i]) >> k) != 0 { continue; }
+            } else if hi != nets.nets_hi[i] { continue; }
+        } else {
+            if hi != nets.nets_hi[i] { continue; }
+            if b < 128 {
+                let k: u64 = (128 - b) as! u64;
+                if ((lo ^ nets.nets_lo[i]) >> k) != 0 { continue; }
+            } else if lo != nets.nets_lo[i] { continue; }
+        }
+        return true;
     }
     return false;
 }
@@ -541,8 +758,8 @@ inline fn ip_in_nets(ip: u32, nets: Cidrs) -> bool {
 // `X-Real-IP`, else the socket peer (fail-closed on malformed hops).
 fn real_ip_trusted(c: Ctx&, nets: Cidrs) -> const u8[:] {
     let peer = c.client_ip();
-    let peer_ip, peer_ok = parse_ipv4(peer);
-    if !peer_ok || !ip_in_nets(peer_ip, nets) { return peer; }
+    let peer_hi, peer_lo, peer_ok = parse_ip(peer);
+    if !peer_ok || !ip_in_nets(peer_hi, peer_lo, nets) { return peer; }
     let xff, ok1 = c.header("X-Forwarded-For");
     if ok1 && xff.len > 0 {
         var hops: const u8[:][16] = [xff[..0]; 16];
@@ -568,9 +785,9 @@ fn real_ip_trusted(c: Ctx&, nets: Cidrs) -> const u8[:] {
         }
         var k = nh - 1;
         while k >= 0 {
-            let hip, hok = parse_ipv4(hops[k]);
+            let hhi, hlo, hok = parse_ip(hops[k]);
             if !hok { return peer; }
-            if !ip_in_nets(hip, nets) { return hops[k]; }
+            if !ip_in_nets(hhi, hlo, nets) { return hops[k]; }
             k--;
         }
     }
@@ -581,7 +798,7 @@ fn real_ip_trusted(c: Ctx&, nets: Cidrs) -> const u8[:] {
         var re = xri.len;
         while re > rs && (xri[re - 1] == ' ' || xri[re - 1] == '\t') { re--; }
         if re > rs {
-            let _, rok = parse_ipv4(xri[rs..re]);
+            let _h, _l, rok = parse_ip(xri[rs..re]);
             if rok { return xri[rs..re]; }
         }
     }
