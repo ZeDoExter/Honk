@@ -129,6 +129,36 @@ fn dsl_routes(app: honk::Ctx&) {
                 app.ok("allowed");
             }
         };
+        app.get("/stream") {
+            app.stream("text/plain") { s =>
+                s.write("chunk-one\n");
+                s.write("chunk-two\n");
+            };
+        };
+        app.get("/sse") {
+            app.sse() { ev =>
+                ev.retry(2000);
+                ev.send("hi\nthere");
+                ev.event("upd", "{\"k\":1}");
+            };
+        };
+        app.post("/form") {
+            app.require_form("msg") { m =>
+                app.ok(m);
+            };
+        };
+        app.post("/upload") {
+            let f, ok = app.multipart_file("doc");
+            if !ok {
+                app.json_error(400, "missing doc");
+            } else {
+                app.json() { j =>
+                    j.set("name", f.filename);
+                    j.set("len", f.data.len);
+                    j.set("tag", app.form_or("tag", ""));
+                };
+            }
+        };
     };
 
     // 128 KiB response with shrunk SO_SNDBUF (16 KiB) for SIGTERM drain test.

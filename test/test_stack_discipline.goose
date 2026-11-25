@@ -120,7 +120,7 @@ fn main() {
     assert(current_rx_stack_top() == baseline);
     print("[PASS] Path 6: 413 Payload Too Large x ", iters, " -> stack top == baseline");
 
-    // 7. 501 Not Implemented (Transfer-Encoding: chunked, 100,000 iterations)
+    // 7. 501 Not Implemented (unsupported Transfer-Encoding: gzip, 100,000 iterations)
     for i in iters {
         let cfd = test_prep_501_fd();
         assert(cfd >= 0);
@@ -133,7 +133,7 @@ fn main() {
     test_drain_client_rx();
     assert(honk_active_conns() == 0);
     assert(current_rx_stack_top() == baseline);
-    print("[PASS] Path 7: 501 Not Implemented (chunked) x ", iters, " -> stack top == baseline");
+    print("[PASS] Path 7: 501 Not Implemented (unsupported TE) x ", iters, " -> stack top == baseline");
 
     // 8. 400 Bad Request (malformed HTTP, 100,000 iterations)
     for i in iters {

@@ -182,6 +182,108 @@ def test_jwriter_and_body_helpers(port):
     print("  [PASS] test_jwriter_and_body_helpers")
 
 
+def read_chunked_response(f, skip_body=False):
+    status_line = f.readline().decode("latin1")
+    assert status_line.startswith("HTTP/1.1 "), f"bad status: {status_line!r}"
+    code = int(status_line.split(" ")[1])
+    headers = {}
+    while True:
+        line = f.readline()
+        assert line, "EOF in headers"
+        if line in (b"\r\n", b"\n"):
+            break
+        k, v = line.split(b":", 1)
+        headers[k.strip().lower()] = v.strip()
+    assert b"content-length" not in headers, f"RFC 9112 violation: {headers}"
+    assert headers.get(b"transfer-encoding") == b"chunked", headers
+    out = bytearray()
+    if not skip_body:
+        while True:
+            sz_line = f.readline().strip()
+            sz = int(sz_line, 16)
+            if sz == 0:
+                assert f.readline() == b"\r\n"
+                break
+            data = f.read(sz)
+            assert len(data) == sz
+            assert f.read(2) == b"\r\n"
+            out.extend(data)
+    return code, headers, bytes(out)
+
+
+def test_streaming_sse_chunked_and_forms(port):
+    # 1. Live TCP chunked stream + SSE + HEAD /v1/sse + keep-alive reuse on the same socket!
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+        f = s.makefile("rb")
+        s.sendall(b"GET /v1/stream HTTP/1.1\r\nHost: x\r\n\r\n")
+        c1, h1, b1 = read_chunked_response(f)
+        assert (c1, h1[b"content-type"], b1) == (200, b"text/plain", b"chunk-one\nchunk-two\n")
+
+        s.sendall(b"GET /v1/sse HTTP/1.1\r\nHost: x\r\n\r\n")
+        c2, h2, b2 = read_chunked_response(f)
+        assert c2 == 200 and h2[b"content-type"] == b"text/event-stream" and h2[b"cache-control"] == b"no-cache"
+        assert b2 == b'retry: 2000\n\ndata: hi\ndata: there\n\nevent: upd\ndata: {"k":1}\n\n', b2
+
+        # HEAD on SSE route: headers emitted, zero body bytes, connection stays usable!
+        s.sendall(b"HEAD /v1/sse HTTP/1.1\r\nHost: x\r\n\r\n")
+        c3, _, b3 = read_chunked_response(f, skip_body=True)
+        assert c3 == 200 and b3 == b""
+
+        s.sendall(b"GET /txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        c4, _, b4 = read_response(f)
+        assert (c4, b4) == (200, b"plain literal")
+        f.close()
+
+    # 2. Inbound Transfer-Encoding: chunked JSON POST to /echo-json
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+        j_part1 = b'{"s":"chunk'
+        j_part2 = b'-ok","n":12,"b":true}'
+        wire = (
+            b"POST /echo-json HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            + f"{len(j_part1):x}\r\n".encode() + j_part1 + b"\r\n"
+            + f"{len(j_part2):x}\r\n".encode() + j_part2 + b"\r\n0\r\n\r\n"
+        )
+        s.sendall(wire)
+        f = s.makefile("rb")
+        code, _, body = read_response(f)
+        f.close()
+        assert code == 201 and pyjson.loads(body) == {"s": "chunk-ok", "n": 12, "b": True}
+
+    # 3. URL-encoded form + binary multipart/form-data upload over TCP
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+        form_b = b"msg=Hello+World%21&other=1"
+        s.sendall(
+            b"POST /v1/form HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+            + f"Content-Length: {len(form_b)}\r\nConnection: close\r\n\r\n".encode() + form_b
+        )
+        f = s.makefile("rb")
+        code, _, body = read_response(f)
+        f.close()
+        assert (code, body) == (200, b"Hello World!")
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+        raw_bin = b"\x00\x01PDF-DATA\xff\r\n"
+        mp = (
+            b"------HonkBnd\r\n"
+            b'Content-Disposition: form-data; name="tag"\r\n\r\ninvoice\r\n'
+            b"------HonkBnd\r\n"
+            b'Content-Disposition: form-data; name="doc"; filename="../../report.pdf"\r\n'
+            b"Content-Type: application/pdf\r\n\r\n"
+            + raw_bin
+            + b"\r\n------HonkBnd--\r\n"
+        )
+        s.sendall(
+            b"POST /v1/upload HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=----HonkBnd\r\n"
+            + f"Content-Length: {len(mp)}\r\nConnection: close\r\n\r\n".encode() + mp
+        )
+        f = s.makefile("rb")
+        code, _, body = read_response(f)
+        f.close()
+        assert code == 200 and pyjson.loads(body) == {"name": "report.pdf", "len": len(raw_bin), "tag": "invoice"}
+    print("  [PASS] test_streaming_sse_chunked_and_forms")
+
+
 def test_outbound_drain_on_sigterm(server_bin, port, label):
     err_path = f"/tmp/honkdsl_{label}_drain_stderr.txt"
     with open(err_path, "wb") as err_fh:
@@ -280,6 +382,7 @@ def run_suite(server_bin, port, label):
             test_methods_and_405_vs_404(port)
             test_params_and_wildcards(port)
             test_jwriter_and_body_helpers(port)
+            test_streaming_sse_chunked_and_forms(port)
 
             # Idle SIGINT: must wake epoll_wait via EINTR immediately and exit 0
             t0 = time.monotonic()
@@ -296,7 +399,7 @@ def run_suite(server_bin, port, label):
 
     test_outbound_drain_on_sigterm(server_bin, port + 2, label)
     test_multiworker_fork(server_bin, port + 4, label)
-    print(f"=== ALL 7 APP DSL + RUNTIME TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 8 APP DSL + RUNTIME TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":

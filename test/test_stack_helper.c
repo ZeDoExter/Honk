@@ -120,12 +120,12 @@ int32_t test_prep_413_fd(void) {
     return cfd;
 }
 
-/* 6. 501 Not Implemented (Transfer-Encoding: chunked) */
+/* 6. 501 Not Implemented (unsupported Transfer-Encoding: gzip) */
 int32_t test_prep_501_fd(void) {
     int cfd = dup(g_sv[0]);
     if (cfd < 0) return -1;
     honk_test_register_fd(cfd, 0, 0);
-    const char *req = "POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    const char *req = "POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n";
     ssize_t w = send(g_sv[1], req, strlen(req), MSG_NOSIGNAL);
     (void)w;
     return cfd;

@@ -170,6 +170,59 @@ fn api_routes(app: honk::Ctx&) {
         };
     };
 
+    // v0.6.0: URL-encoded forms, zero-copy multipart/form-data, chunked stream & SSE
+    app.post("/forms/submit") {
+        app.require_form("full name") { name =>
+            let age, aok = app.form_int("age");
+            let role = app.form_or("role", "guest");
+            app.json() { j =>
+                j.set("name", name);
+                j.set("age", if aok { age } else { -1 });
+                j.set("role", role);
+            };
+        };
+    };
+
+    app.post("/forms/upload") {
+        var count: i64 = 0;
+        let valid = app.each_part() { _p =>
+            count++;
+        };
+        let f, fok = app.multipart_file("avatar");
+        if !valid || !fok {
+            app.json_error(400, "invalid multipart");
+        } else {
+            let b0: i64 = if f.data.len > 0 { f.data[0] } else { -1 };
+            let b_last: i64 = if f.data.len > 0 { f.data[f.data.len - 1] } else { -1 };
+            app.json() { j =>
+                j.set("title", app.form_or("title", ""));
+                j.set("filename", f.filename);
+                j.set("ctype", f.ctype);
+                j.set("size", f.data.len);
+                j.set("b0", b0);
+                j.set("blast", b_last);
+                j.set("parts", count);
+            };
+        }
+    };
+
+    app.get("/stream/chunks") {
+        app.stream("text/plain") { s =>
+            s.write("alpha-");
+            s.write("beta");
+        };
+    };
+
+    app.get("/stream/sse") {
+        app.sse() { ev =>
+            ev.retry(1500);
+            ev.comment("ping");
+            ev.send("l1\nl2");
+            ev.event("tick", "99");
+            ev.id_event("7", "done", "ok");
+        };
+    };
+
     app.after() {
         let start = app.tmp.len;
         format(app.tmp, app.status);
@@ -328,12 +381,52 @@ fn main() {
     t.get_headers("/rl/ip", "X-Real-IP: 198.51.100.7\r\n") { app => api_routes(app); };
     assert(t.status == 200 && t.body() == "198.51.100.7");
 
-    // 8. 10,000 in-memory requests loop + rate-table cleanup for LSan
+    // 8. URL-encoded form + require_form + multipart/form-data + stream + SSE
+    t.post_form("/forms/submit", "full+name=Ada+Lovelace%21&age=36") { app => api_routes(app); };
+    assert(t.status == 200 && t.body() == "{\"name\":\"Ada Lovelace!\",\"age\":36,\"role\":\"guest\"}");
+
+    t.post_form("/forms/submit", "age=36") { app => api_routes(app); };
+    assert(t.status == 400 && t.body() == "{\"error\":\"invalid or missing field: full name\"}");
+
+    var mp_body: u8[>..] = [];
+    mp_body.append("--Bnd123\r\n");
+    mp_body.append("Content-Disposition: form-data; name=\"title\"\r\n\r\n");
+    mp_body.append("Profile Photo\r\n");
+    mp_body.append("--Bnd123\r\n");
+    mp_body.append("Content-Disposition: form-data; name=\"avatar\"; filename=\"C:\\fakepath\\pic.png\"\r\n");
+    mp_body.append("Content-Type: image/png\r\n\r\n");
+    mp_body.push(0x89);
+    mp_body.push(0x00);
+    mp_body.append("\r\n--not-the-boundary\r\n");
+    mp_body.push(0xff);
+    mp_body.append("\r\n--Bnd123--\r\n");
+
+    t.req("POST", "/forms/upload", "Content-Type: multipart/form-data; boundary=\"Bnd123\"\r\n", mp_body[..]) { app =>
+        api_routes(app);
+    };
+    assert(t.status == 200 && t.body() == "{\"title\":\"Profile Photo\",\"filename\":\"pic.png\",\"ctype\":\"image/png\",\"size\":25,\"b0\":137,\"blast\":255,\"parts\":2}");
+
+    // Truncated multipart (missing closing --Bnd123--) -> 400
+    t.req("POST", "/forms/upload", "Content-Type: multipart/form-data; boundary=Bnd123\r\n", "--Bnd123\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"x\"\r\n\r\nabc") { app =>
+        api_routes(app);
+    };
+    assert(t.status == 400);
+
+    t.get("/stream/chunks") { app => api_routes(app); };
+    let te_h, te_ok = t.header("Transfer-Encoding");
+    assert(t.status == 200 && te_ok && te_h == "chunked" && t.body() == "alpha-beta");
+
+    t.get("/stream/sse") { app => api_routes(app); };
+    let sse_cc, scc_ok = t.header("Cache-Control");
+    assert(t.status == 200 && t.ctype() == "text/event-stream" && scc_ok && sse_cc == "no-cache");
+    assert(t.body() == "retry: 1500\n\n: ping\n\ndata: l1\ndata: l2\n\nevent: tick\ndata: 99\n\nid: 7\nevent: done\ndata: ok\n\n");
+
+    // 9. 10,000 in-memory requests loop + rate-table cleanup for LSan
     for _ in 10000 {
         t.get("/api/v1/nested") { app => api_routes(app); };
         assert(t.status == 200);
     }
     honk_rate_reset();
 
-    print("ALL IN-MEMORY UNIT + AUTH + EMBED + RATE-LIMIT TESTS PASSED");
+    print("ALL IN-MEMORY UNIT + AUTH + EMBED + RATE-LIMIT + STREAM + FORM TESTS PASSED");
 }

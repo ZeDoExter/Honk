@@ -235,19 +235,60 @@ def test_05_max_header_431_and_max_body_413(port: int):
 
 
 def test_06_chunked_501_and_malformed_400(port: int):
-    # Transfer-Encoding: chunked -> 501 Not Implemented
-    req501 = (
+    # 1. Valid single-recv Transfer-Encoding: chunked (+ chunk-ext + trailer) -> 200 OK
+    req_chunked = (
         b"POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n"
-        b"5\r\nhello\r\n0\r\n\r\n"
+        b"5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\nX-Trailer: ok\r\n\r\n"
     )
+    resp_ch = raw_request(port, req_chunked)
+    assert resp_ch.startswith(b"HTTP/1.1 200 OK") and resp_ch.endswith(b"\r\n\r\nhello world"), resp_ch
+
+    # 2. Split-recv Transfer-Encoding: chunked (mid-hex, mid-data, mid-0) + pipelined keep-alive GET
+    with socket.create_connection(("127.0.0.1", port), timeout=3.0) as s:
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        pieces = [
+            b"POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: CHUNKED\r\n\r\n4",
+            b"\r\nab",
+            b"cd\r\n3\r\nXYZ\r\n0\r",
+            b"\n\r\nGET /plaintext HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ]
+        for p in pieces:
+            s.sendall(p)
+            time.sleep(0.02)
+        resps = read_n_responses(s, 2)
+        assert resps[0][0].startswith(b"HTTP/1.1 200 OK") and resps[0][1] == b"abcdXYZ", resps[0]
+        assert resps[1][0].startswith(b"HTTP/1.1 200 OK") and resps[1][1] == b"Hello, World!", resps[1]
+
+    # 3. Oversize chunked (> 1 MiB) -> 413 Payload Too Large
+    resp413_ch = raw_request(
+        port,
+        b"POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n100001\r\nhello",
+    )
+    assert resp413_ch.startswith(b"HTTP/1.1 413 Payload Too Large"), resp413_ch
+
+    # 4. CL + TE request smuggling attempt -> 400 Bad Request
+    resp400_smug = raw_request(
+        port,
+        b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+    )
+    assert resp400_smug.startswith(b"HTTP/1.1 400 Bad Request"), resp400_smug
+
+    # 5. Malformed chunk size -> 400 Bad Request
+    resp400_ch = raw_request(
+        port,
+        b"POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\n",
+    )
+    assert resp400_ch.startswith(b"HTTP/1.1 400 Bad Request"), resp400_ch
+
+    # 6. Unsupported Transfer-Encoding (gzip) -> 501 Not Implemented
+    req501 = b"POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n"
     resp501 = raw_request(port, req501)
     assert resp501.startswith(b"HTTP/1.1 501 Not Implemented"), resp501
 
-    # Malformed request line -> 400 Bad Request
+    # 7. Malformed request line & invalid Content-Length -> 400 Bad Request
     resp400_a = raw_request(port, b"NOT AN HTTP REQUEST\r\n\r\n")
     assert resp400_a.startswith(b"HTTP/1.1 400 Bad Request"), resp400_a
 
-    # Invalid Content-Length -> 400 Bad Request
     resp400_b = raw_request(port, b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: -12abc\r\n\r\n")
     assert resp400_b.startswith(b"HTTP/1.1 400 Bad Request"), resp400_b
     print("  [PASS] test_06_chunked_501_and_malformed_400")
