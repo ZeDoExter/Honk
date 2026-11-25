@@ -28,7 +28,7 @@ import json;
 import src.honk_net.honk_net;
 import src.honk_ctx.honk_ctx;
 
-extern fn honk_sendfile_data(fd: i32, file_fd: i32, count: i64) -> i32;
+extern fn honk_sendfile_data(fd: i32, file_fd: i32, offset: i64, count: i64) -> i32;
 
 struct Config {
     port: i32,
@@ -152,7 +152,7 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
                     honk_send(fd, ctx.resp_hdrs);
                 }
                 if ctx.resp_file_fd >= 0 {
-                    honk_sendfile_data(fd, ctx.resp_file_fd, ctx.resp_file_n);
+                    honk_sendfile_data(fd, ctx.resp_file_fd, ctx.resp_file_off, ctx.resp_file_n);
                 }
             } else if tx_buf.len > 0 {
                 honk_send(fd, tx_buf);

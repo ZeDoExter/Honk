@@ -1218,16 +1218,16 @@ int32_t honk_ws_send_all(int32_t fd, sl_u8_shim data, int32_t timeout_ms) {
     return 0;
 }
 
-/* Queue file bytes behind any pending headers and push via sendfile().
- * The turn MUST have flushed earlier tx_buf bytes first (headers precede
- * file bytes). At most one active transfer per connection: a second file
- * while one is in flight closes the connection cleanly (documented).
- * Returns 0 (accepted: sent or resumed via EPOLLOUT), -1 (closed).
+/* Queue file bytes [offset, offset + count) behind any pending headers and
+ * push via sendfile(). The turn MUST have flushed earlier tx_buf bytes first
+ * (headers precede file bytes). At most one active transfer per connection:
+ * a second file while one is in flight closes the connection cleanly
+ * (documented). Returns 0 (accepted: sent or resumed via EPOLLOUT), -1 (closed).
  * Ownership: once accepted with remain > 0 the conn owns file_fd; it is
  * closed exactly once (on completion, error, timeout, or shutdown).
  */
-int32_t honk_sendfile_data(int32_t fd, int32_t file_fd, int64_t count) {
-    if (count <= 0 || file_fd < 0) {
+int32_t honk_sendfile_data(int32_t fd, int32_t file_fd, int64_t offset, int64_t count) {
+    if (count <= 0 || offset < 0 || file_fd < 0) {
         if (file_fd >= 0) close(file_fd);
         return 0;
     }
@@ -1243,7 +1243,7 @@ int32_t honk_sendfile_data(int32_t fd, int32_t file_fd, int64_t count) {
         return -1;
     }
     c->sendfile_fd = file_fd;
-    c->sendfile_off = 0;
+    c->sendfile_off = offset;
     c->sendfile_remain = count;
     /* Headers (pending_tx) always flush first; then file bytes. */
     if (flush_pending_tx(fd) < 0) return -1;

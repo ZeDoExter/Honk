@@ -62,6 +62,7 @@ struct Ctx {
     // Static file staging (honk_static): headers slice + open fd + bytes.
     resp_hdrs: const u8[:],
     resp_file_fd: i32,     // -1 when no file is staged
+    resp_file_off: i64,    // first byte of the staged [off, off + n) slice
     resp_file_n: i64,
     resp_len: i64,         // >= 0 overrides Content-Length (HEAD/empty); -1 = body.len
     sent: bool,            // static response queued for direct send (skip emit)
@@ -107,6 +108,7 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
         dom_root: null,
         resp_hdrs: "",
         resp_file_fd: -1,
+        resp_file_off: 0,
         resp_file_n: 0,
         resp_len: -1,
         sent: false,
