@@ -99,11 +99,6 @@ fn main() {
                 app.ok_json();
             }
         };
-        app.post("/__shutdown") {
-            honk_request_stop();
-            app.keep_alive = false;
-            app.text(200, "shutting down");
-        };
         app.static_dir("/", "public");
         app.get_wild("/*") { _r =>
             serve_rel(app, "public", "index.html", false);

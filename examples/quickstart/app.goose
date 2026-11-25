@@ -59,10 +59,5 @@ fn main() {
                 };
             };
         };
-        app.post("/__shutdown") {
-            honk_request_stop();
-            app.keep_alive = false;
-            app.text(200, "shutting down");
-        };
     };
 }
