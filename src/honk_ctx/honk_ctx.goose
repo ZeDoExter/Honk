@@ -549,6 +549,7 @@ inline fn cors_preflight(c: Ctx&) {
 }
 
 fn status_text(code: i64) -> const u8[:] {
+    if code == 101 { return "Switching Protocols"; }
     if code == 200 { return "OK"; }
     if code == 201 { return "Created"; }
     if code == 204 { return "No Content"; }
@@ -564,6 +565,7 @@ fn status_text(code: i64) -> const u8[:] {
     if code == 404 { return "Not Found"; }
     if code == 405 { return "Method Not Allowed"; }
     if code == 422 { return "Unprocessable Entity"; }
+    if code == 426 { return "Upgrade Required"; }
     if code == 429 { return "Too Many Requests"; }
     return "Internal Server Error";
 }

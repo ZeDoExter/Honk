@@ -909,12 +909,16 @@ fn write(s: Stream&, data: const u8[:]) {
     }
 }
 
+inline fn stream_run<F>(s: Stream&) {
+    F(s);
+}
+
 // Stream an HTTP/1.1 `Transfer-Encoding: chunked` response (`app.stream("text/plain") { s => ... }`).
 inline fn stream<F>(app: Ctx&, ctype: const u8[:]) {
     let ok = stream_begin(app, ctype);
     let bstart = app.res.len;
     var s = Stream { fd: app.fd, head_only: app.head_only, closed: !ok, buf: app.res };
-    F(s);
+    stream_run(s) { st => F(st); };
     stream_finish(app, s.closed, bstart);
 }
 
@@ -1018,6 +1022,10 @@ fn retry(ev: Sse&, ms: i64) {
     sse_flush_frame(ev, frame);
 }
 
+inline fn sse_run<F>(ev: Sse&) {
+    F(ev);
+}
+
 // Stream `text/event-stream` (`Cache-Control: no-cache`, `X-Accel-Buffering: no`, chunked).
 inline fn sse<F>(app: Ctx&) {
     app.set_header("Cache-Control", "no-cache");
@@ -1025,6 +1033,6 @@ inline fn sse<F>(app: Ctx&) {
     let ok = stream_begin(app, "text/event-stream");
     let bstart = app.res.len;
     var ev = Sse { fd: app.fd, head_only: app.head_only, closed: !ok, buf: app.res };
-    F(ev);
+    sse_run(ev) { e => F(e); };
     stream_finish(app, ev.closed, bstart);
 }
