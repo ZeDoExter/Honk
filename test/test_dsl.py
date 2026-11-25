@@ -284,6 +284,102 @@ def test_streaming_sse_chunked_and_forms(port):
     print("  [PASS] test_streaming_sse_chunked_and_forms")
 
 
+def make_ws_client_frame(opcode: int, payload: bytes, fin: bool = True, masked: bool = True) -> bytes:
+    b0 = (0x80 if fin else 0x00) | (opcode & 0x0F)
+    mask_bit = 0x80 if masked else 0x00
+    n = len(payload)
+    out = bytearray([b0])
+    if n < 126:
+        out.append(mask_bit | n)
+    elif n <= 65535:
+        out.append(mask_bit | 126)
+        out.extend(n.to_bytes(2, "big"))
+    else:
+        out.append(mask_bit | 127)
+        out.extend(n.to_bytes(8, "big"))
+    if masked:
+        mkey = b"\x37\xfa\x21\x3d"
+        out.extend(mkey)
+        out.extend(bytes(payload[i] ^ mkey[i & 3] for i in range(n)))
+    else:
+        out.extend(payload)
+    return bytes(out)
+
+
+def read_ws_server_frame(f):
+    hdr = f.read(2)
+    assert len(hdr) == 2, f"EOF reading ws frame header: {hdr!r}"
+    fin = bool(hdr[0] & 0x80)
+    opcode = hdr[0] & 0x0F
+    masked = bool(hdr[1] & 0x80)
+    assert not masked, "Server-to-client WebSocket frame must not be masked"
+    n = hdr[1] & 0x7F
+    if n == 126:
+        n = int.from_bytes(f.read(2), "big")
+    elif n == 127:
+        n = int.from_bytes(f.read(8), "big")
+    payload = f.read(n) if n > 0 else b""
+    assert len(payload) == n
+    return fin, opcode, payload
+
+
+def test_websocket_and_openapi(port):
+    # 1. OpenAPI 3.1.0 JSON (merges duplicate /todos paths + typed integer :id + bearerAuth) & /v1/docs HTML
+    code, hdrs, body = req(port, "GET", "/v1/openapi.json")
+    assert code == 200 and hdrs[b"content-type"] == b"application/json"
+    spec = pyjson.loads(body)
+    assert spec["openapi"] == "3.1.0" and spec["info"]["version"] == "0.7.0"
+    assert set(spec["paths"]["/todos"].keys()) == {"get", "post"}
+    assert spec["paths"]["/todos/{id}/toggle"]["patch"]["parameters"][0]["schema"]["type"] == "integer"
+    assert spec["paths"]["/todos/{id}"]["delete"]["security"] == [{"bearerAuth": []}]
+    assert "bearerAuth" in spec["components"]["securitySchemes"]
+
+    code_d, hdrs_d, body_d = req(port, "GET", "/v1/docs")
+    assert code_d == 200 and hdrs_d[b"content-type"] == b"text/html" and b"@scalar/api-reference" in body_d
+
+    # 2. Live TCP RFC 6455 WebSocket upgrade + Ping/Pong + fragmented text + 16-bit extended len + Close
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+        s.sendall(
+            b"GET /v1/ws/lobby HTTP/1.1\r\nHost: localhost\r\n"
+            b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        f = s.makefile("rb")
+        status = f.readline()
+        assert status.startswith(b"HTTP/1.1 101 Switching Protocols"), status
+        resp_h = {}
+        while True:
+            ln = f.readline()
+            if ln in (b"\r\n", b"\n", b""):
+                break
+            k, v = ln.split(b":", 1)
+            resp_h[k.strip().lower()] = v.strip()
+        assert resp_h[b"sec-websocket-accept"] == b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+        # Ping -> automatic Pong
+        s.sendall(make_ws_client_frame(9, b"hb"))
+        fin, op, p_data = read_ws_server_frame(f)
+        assert (fin, op, p_data) == (True, 10, b"hb")
+
+        # Fragmented text message (FIN=0 opcode=1 + FIN=1 opcode=0)
+        s.sendall(make_ws_client_frame(1, b"hello ", fin=False) + make_ws_client_frame(0, b"ws!", fin=True))
+        fin, op, msg1 = read_ws_server_frame(f)
+        assert fin and op == 1 and pyjson.loads(msg1) == {"room": "lobby", "msg": "hello ws!"}
+
+        # 200-byte 16-bit extended-length message
+        big_txt = "X" * 200
+        s.sendall(make_ws_client_frame(1, big_txt.encode()))
+        fin, op, msg2 = read_ws_server_frame(f)
+        assert fin and op == 1 and pyjson.loads(msg2) == {"room": "lobby", "msg": big_txt}
+
+        # Unmasked client frame -> RFC 6455 §5.1 protocol error Close 1002
+        s.sendall(make_ws_client_frame(1, b"unmasked", masked=False))
+        fin, op, close_pl = read_ws_server_frame(f)
+        assert fin and op == 8 and int.from_bytes(close_pl[:2], "big") == 1002
+        f.close()
+    print("  [PASS] test_websocket_and_openapi")
+
+
 def test_outbound_drain_on_sigterm(server_bin, port, label):
     err_path = f"/tmp/honkdsl_{label}_drain_stderr.txt"
     with open(err_path, "wb") as err_fh:
@@ -383,6 +479,7 @@ def run_suite(server_bin, port, label):
             test_params_and_wildcards(port)
             test_jwriter_and_body_helpers(port)
             test_streaming_sse_chunked_and_forms(port)
+            test_websocket_and_openapi(port)
 
             # Idle SIGINT: must wake epoll_wait via EINTR immediately and exit 0
             t0 = time.monotonic()
@@ -399,7 +496,7 @@ def run_suite(server_bin, port, label):
 
     test_outbound_drain_on_sigterm(server_bin, port + 2, label)
     test_multiworker_fork(server_bin, port + 4, label)
-    print(f"=== ALL 8 APP DSL + RUNTIME TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 9 APP DSL + RUNTIME TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import std;
 import honk from "..";
 import honk.src.honk_test.honk_test;
 import honk.src.honk_auth.honk_auth;
+import honk.src.honk_ws.honk_ws;
+import honk.src.honk_openapi.honk_openapi;
 
 fn hex_encode(bytes: const u8[:], out: u8[>..]&) -> const u8[:] {
     let hx = "0123456789abcdef";
@@ -41,6 +43,12 @@ fn verify_crypto_vectors() {
     var long_key: u8[131] = [0xaa; 131];
     let mac6 = honk::hmac_sha256(long_key[..], "Test Using Larger Than Block-Size Key - Hash Key First");
     assert(hex_encode(mac6[..], buf) == "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+
+    // NIST FIPS 180-4 SHA-1 ("abc") + RFC 6455 §4.2.2 Sec-WebSocket-Accept vector
+    let s1_abc = honk::sha1("abc");
+    assert(hex_encode(s1_abc[..], buf) == "a9993e364706816aba3e25717850c26c9cd0d89d");
+    let ws_acc = honk::ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==", buf);
+    assert(ws_acc == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 }
 
 fn api_routes(app: honk::Ctx&) {
@@ -222,6 +230,23 @@ fn api_routes(app: honk::Ctx&) {
             ev.id_event("7", "done", "ok");
         };
     };
+
+    // v0.7.0: RFC 6455 WebSocket upgrade + OpenAPI 3.1.0 + Docs UI
+    app.ws("/ws/:room") { ws =>
+        ws.each_msg() { msg =>
+            ws.send(msg);
+        };
+    };
+
+    app.openapi("/openapi.json", "Unit API", "0.7.0") { spec =>
+        spec.desc("Test spec");
+        spec.server("http://localhost:18080");
+        spec.op("GET", "/todos", "List todos");
+        spec.op_body("POST", "/todos", "Create todo", "{\"type\":\"object\"}");
+        spec.op_int("PATCH", "/todos/:id/toggle", "Toggle todo");
+        spec.op_auth("DELETE", "/todos/:id", "Delete todo");
+    };
+    app.docs("/docs", "/openapi.json", "Unit API <Docs>");
 
     app.after() {
         let start = app.tmp.len;
@@ -421,12 +446,32 @@ fn main() {
     assert(t.status == 200 && t.ctype() == "text/event-stream" && scc_ok && sse_cc == "no-cache");
     assert(t.body() == "retry: 1500\n\n: ping\n\ndata: l1\ndata: l2\n\nevent: tick\ndata: 99\n\nid: 7\nevent: done\ndata: ok\n\n");
 
-    // 9. 10,000 in-memory requests loop + rate-table cleanup for LSan
+    // 9. WebSocket RFC 6455 handshake (101 / 426 / 400) + OpenAPI 3.1.0 + Docs UI
+    let ws_hdrs = "Upgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n";
+    t.get_headers("/ws/general", ws_hdrs) { app => api_routes(app); };
+    let ws_acc_h, wsa_ok = t.header("Sec-WebSocket-Accept");
+    assert(t.status == 101 && wsa_ok && ws_acc_h == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+
+    let ws_bad_ver = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 8\r\n";
+    t.get_headers("/ws/general", ws_bad_ver) { app => api_routes(app); };
+    let wsv_h, wsv_ok = t.header("Sec-WebSocket-Version");
+    assert(t.status == 426 && wsv_ok && wsv_h == "13");
+
+    t.get("/ws/general") { app => api_routes(app); };
+    assert(t.status == 400);
+
+    t.get("/openapi.json") { app => api_routes(app); };
+    assert(t.status == 200 && t.ctype() == "application/json" && t.body()[..20] == "{\"openapi\":\"3.1.0\",\"");
+
+    t.get("/docs") { app => api_routes(app); };
+    assert(t.status == 200 && t.ctype() == "text/html" && t.body().len > 150);
+
+    // 10. 10,000 in-memory requests loop + rate-table cleanup for LSan
     for _ in 10000 {
         t.get("/api/v1/nested") { app => api_routes(app); };
         assert(t.status == 200);
     }
     honk_rate_reset();
 
-    print("ALL IN-MEMORY UNIT + AUTH + EMBED + RATE-LIMIT + STREAM + FORM TESTS PASSED");
+    print("ALL IN-MEMORY UNIT + AUTH + EMBED + RATE-LIMIT + STREAM + FORM + WS + OPENAPI TESTS PASSED");
 }

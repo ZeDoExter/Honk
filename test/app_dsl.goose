@@ -6,6 +6,8 @@
 import std;
 import os;
 import honk from "..";
+import honk.src.honk_ws.honk_ws;
+import honk.src.honk_openapi.honk_openapi;
 
 fn dsl_routes(app: honk::Ctx&) {
     app.get("/", "dsl root");
@@ -159,6 +161,22 @@ fn dsl_routes(app: honk::Ctx&) {
                 };
             }
         };
+        app.ws("/ws/:room") { ws =>
+            let room = app.param("room");
+            ws.each_msg() { msg =>
+                ws.send_json() { j =>
+                    j.set("room", room);
+                    j.set("msg", msg);
+                };
+            };
+        };
+        app.openapi("/openapi.json", "DSL API", "0.7.0") { spec =>
+            spec.op("GET", "/todos", "List");
+            spec.op_body("POST", "/todos", "Create", "{\"type\":\"object\"}");
+            spec.op_int("PATCH", "/todos/:id/toggle", "Toggle");
+            spec.op_auth("DELETE", "/todos/:id", "Delete");
+        };
+        app.docs("/docs", "/v1/openapi.json", "DSL API");
     };
 
     // 128 KiB response with shrunk SO_SNDBUF (16 KiB) for SIGTERM drain test.
