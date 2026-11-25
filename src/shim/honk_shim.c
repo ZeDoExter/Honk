@@ -1010,9 +1010,10 @@ int32_t honk_send(int32_t fd, sl_u8_shim data) {
 /* Static files: secure open + size + zero-copy send.
  *
  * honk_file_open(root, rel): opens root/rel read-only. rel must already be
- * validated by the caller (relative, decoded, no NUL/backslash/.. segments).
- * O_NOFOLLOW rejects symlinks; fstat requires a regular file. Returns the fd
- * (>= 0, owned by the caller) or -1.
+ * validated by the caller (relative, decoded, no NUL/backslash/.. segments);
+ * the checks below re-enforce that across FFI so a future caller cannot
+ * regress into traversal. O_NOFOLLOW rejects symlinks; fstat requires a
+ * regular file. Returns the fd (>= 0, owned by the caller) or -1.
  */
 int32_t honk_file_open(sl_u8_shim root, sl_u8_shim rel) {
     if (root.len <= 0 || rel.len <= 0) return -1;
@@ -1022,6 +1023,14 @@ int32_t honk_file_open(sl_u8_shim root, sl_u8_shim rel) {
         if (rel.data[i] == '\0' || rel.data[i] == '\\') return -1;
     }
     if (rel.data[0] == '/') return -1;
+    /* Reject `..` as a full segment (standalone, leading, middle, trailing). */
+    for (int64_t i = 0; i < rel.len; i++) {
+        if (rel.data[i] == '.' && i + 1 < rel.len && rel.data[i + 1] == '.' &&
+            (i == 0 || rel.data[i - 1] == '/') &&
+            (i + 2 >= rel.len || rel.data[i + 2] == '/')) {
+            return -1;
+        }
+    }
     char path[4096];
     memcpy(path, root.data, (size_t)root.len);
     path[root.len] = '/';
