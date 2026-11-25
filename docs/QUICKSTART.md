@@ -6,7 +6,7 @@ need **five** Goose ideas (cheat sheet below) to ship a Honk API.
 ## 0. Prerequisites
 
 - Linux or WSL2, `gcc`, `python3`, `git`
-- This repo (Goose ships pinned inside `./goose_repo`)
+- This repo (`./honk setup` fetches and builds the pinned Goose compiler if needed)
 
 ```sh
 ./honk doctor     # checks everything, tells you how to fix gaps
@@ -46,44 +46,57 @@ You will only meet these five constructs in Honk apps:
 
 | You know (JS / Go / Python) | Goose in Honk | Example |
 |---|---|---|
-| `string` slice / `&str` / `str` | `const u8[:]` — a **view** (pointer + length), never copied | `ctx.path`, `ctx.body` |
-| `struct` / `struct` / `dataclass` | `struct` with fields; `Ctx { method: m, .. }` fills the rest with defaults | `honk::Config { port: 8080, .. }` |
-| `val, err := …` / destructuring | `let val, ok = …` — multiple return values, no exceptions | `let id, ok = ctx.param_int(0);` |
-| `Buffer` / `bytes.Buffer` / `bytearray` | `u8[>..]&` — a growable builder (`out.append(x)`, `out.push(c)`); auto-freed at scope exit | `ctx.res.append("hi")` |
-| arrow fn / closure / `def` | trailing block `{ arg => … }` — inlined at compile time (**never `return`/`break` inside; use if/else**) | `honk::request(fd, d) { ctx => … };` |
+| `string` slice / `&str` / `str` | `const u8[:]` — a **view** (pointer + length), never copied | `app.path`, `app.body` |
+| `struct` / `struct` / `dataclass` | `struct` with fields; `Config { port: 8080, .. }` fills the rest with defaults | `honk::Config { port: 8080, .. }` |
+| `val, err := …` / destructuring | `let val, ok = …` — multiple return values, no exceptions | `let age, ok = app.body_int("age");` |
+| `Buffer` / `bytes.Buffer` / `bytearray` | `u8[>..]&` — a growable builder (`out.append(x)`, `out.push(c)`); auto-freed at scope exit | `app.res.append("hi")` |
+| arrow fn / closure / `def` | trailing block `{ arg => … }` — inlined at compile time (**never `return`/`break` inside; use if/else**) | `honk::listen(18080) { app => … };` |
 
 Everything else is plain `if`/`else`, `for x in n`, `while`, `==`, `+` — exactly
 like you expect. Types you will see: `i64` (int), `u8` (byte), `bool`,
-`const u8[:]` (read-only view). A leading `&` (`Ctx&`) means "by reference".
+`const u8[:]` (read-only view). A trailing `&` (`honk::Ctx&`) means "by reference".
 
-## 4. The 15-line app
+## 4. From 4 lines to a JSON API
+
+A minimal server is 4 lines (`./honk new` writes the `import honk from ".../src";`
+path and `.build` file for you):
 
 ```goose
-import std;
-import os;
-import honk_net from "/path/to/Honk/src/honk_net";
-import honk_ctx from "/path/to/Honk/src/honk_ctx";
-import honk_serve from "/path/to/Honk/src/honk_serve";
-
-thread_fn worker(port: i32) {
-    honk::listen_or_abort(port);
-    honk::serve() { fd, date =>
-        honk::request(fd, date) { ctx =>
-            if ctx.method == "GET" && ctx.path == "/" {
-                ctx.text(200, "Hello, World!");
-            } else if ctx.method == "GET" && ctx.path == "/json" {
-                ctx.res.append("{\"message\":\"Hello, World!\"}");
-                ctx.json_raw(200, ctx.res[..]);
-            }
-        };
-    };
-}
-
+import honk from "/path/to/Honk/src";
 fn main() {
-    let tid = thread_spawn(worker, 18080);
-    thread_wait(tid);
+    honk::listen(18080) { app => app.get("/", "Hello, World!"); };
 }
 ```
 
-Unmatched paths answer `404` automatically. Next: [`GUIDE.md`](GUIDE.md) for
-routing, JSON validation, auth, CORS, cookies, and deployment recipes.
+Add `:params`, `*` wildcards, streaming JSON, and validated `POST` bodies without
+touching threads, buffers, or manual JSON escaping:
+
+```goose
+import honk from "/path/to/Honk/src";
+
+fn main() {
+    honk::listen(18080) { app =>
+        app.get("/", "Hello, World!");
+        app.get_param("/users/:id") { id =>
+            app.json() { j => j.str("id", id); };
+        };
+        app.post("/users") {
+            app.require_str("name") { name =>
+                let age, ok = app.body_int("age");
+                if !ok {
+                    app.json_error(400, "age (int) required");
+                } else {
+                    app.created_json() { j =>
+                        j.str("name", name);
+                        j.int("age", age);
+                    };
+                }
+            };
+        };
+    };
+}
+```
+
+Unmatched paths answer `404` automatically; a matched path with the wrong HTTP
+method answers `405 Method Not Allowed`. Next: [`GUIDE.md`](GUIDE.md) for
+routing, JSON validation, auth, CORS, cookies, static files, SQLite, and deployment.

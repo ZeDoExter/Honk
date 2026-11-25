@@ -1,46 +1,45 @@
 # Honk — a zero-copy HTTP framework in Goose
 
 Honk is an HTTP/1.1 backend framework written in [Goose](https://github.com/aardappel/goose)
-(ahead-of-time compiled to C) for Linux `epoll` servers: a 15-line Hello World,
+(ahead-of-time compiled to C) for Linux `epoll` servers: a **4-line Hello World**,
 **~2 MB flat RSS**, a **~150 KiB zero-dependency binary**, and zero per-request
 heap allocations — at `89%` of hand-written C speed.
 
 ```sh
 git clone https://github.com/ZeDoExter/Honk.git && cd Honk
-./honk doctor               # checks gcc + pinned Goose + wrk
+./honk doctor                              # checks gcc + pinned Goose + wrk
 ./honk new my-api && ./honk dev my-api     # scaffold + auto-reload dev server
 curl http://127.0.0.1:18080/               # Hello from my-api!
 ```
 
-A complete Hello World + JSON app is ~15 lines of Goose:
+A complete Hello World is **4 lines of Goose**:
 
 ```goose
-import honk_serve from "/path/to/Honk/src/honk_serve";  // (+ honk_net, honk_ctx)
-
-thread_fn worker(port: i32) {
-    honk::listen_or_abort(port);
-    honk::serve() { fd, date =>
-        honk::request(fd, date) { ctx =>
-            if ctx.method == "GET" && ctx.path == "/" {
-                ctx.text(200, "Hello, World!");
-            } else if ctx.method == "GET" && ctx.path == "/json" {
-                ctx.res.append("{\"message\":\"Hello, World!\"}");
-                ctx.json_raw(200, ctx.res[..]);
-            }   // anything else answers 404 automatically
-        };
-    };
-}
-
+import honk from "./src";
 fn main() {
-    let tid = thread_spawn(worker, 18080);
-    thread_wait(tid);
+    honk::listen(18080) { app => app.get("/", "Hello, World!"); };
+}
+```
+
+Static routes, `:params`, `*` wildcards, and streaming JSON in **9 lines** —
+with automatic `404` / `405` handling and zero closure allocations:
+
+```goose
+import honk from "./src";
+fn main() {
+    honk::listen(18080) { app =>
+        app.get("/health", "ok");
+        app.get_param("/users/:name") { name => app.ok(name); };
+        app.get_wild("/files/*") { path => app.ok(path); };
+        app.get("/json") { app.json() { j => j.str("message", "Hello, World!"); }; };
+    };
 }
 ```
 
 New to Goose? [`docs/QUICKSTART.md`](docs/QUICKSTART.md) gets you productive in
 5 minutes with a JS/Go/Python cheat sheet. Never heard of `epoll`? Good — you
-will never touch it: routing, JSON, middleware, and buffers are
-zero-copy machinery under a boring, obvious API.
+will never touch it: routing, JSON, static `sendfile`, SQLite, and buffers are
+zero-copy machinery under a short, readable API.
 
 How it gets there:
 
@@ -51,8 +50,8 @@ How it gets there:
   the request buffer — parsed in place with `picohttpparser`, never copied.
 - **Scoped builders**: per-request builders live in an explicit inner scope and reset
   on every pipelined request (verified in generated C).
-- **Dispatch-as-code**: routes and middleware monomorphize straight into the worker
-  loop — no function-pointer tables, no per-request closures.
+- **Dispatch-as-code**: `honk::listen`, `app.get*`, and `app.json` are `inline fn`s that
+  monomorphize straight into the worker loop — no function-pointer tables, no per-request closures.
 
 ## Documentation index
 
@@ -61,8 +60,8 @@ How it gets there:
 | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | 5-minute tutorial + Goose cheat sheet |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Recipes: routing, JSON, auth, CORS, cookies, static, SQLite, deploy |
 | [`docs/API.md`](docs/API.md) | Every public function, one table per module |
-| [`examples/quickstart/`](examples/quickstart/) | Full commented example app |
-| [`examples/fullstack_todo/`](examples/fullstack_todo/) | Single-binary Todo app (sendfile UI + SQLite API) |
+| [`examples/quickstart/`](examples/quickstart/) | Commented App DSL example (`:params`, bearer auth, validated JSON POST) |
+| [`examples/fullstack_todo/`](examples/fullstack_todo/) | Single-binary Todo app (`sendfile` UI + SQLite API) |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architecture decision record (D-001…) |
 | [`docs/history/`](docs/history/) | Development log: transport → framework → shootout → DX → v0.1.0 |
 
@@ -150,14 +149,15 @@ no pre-serialized literals, no strawman configs.
 
 ## Capabilities & roadmap
 
-**Today**: `./honk` CLI (`setup`/`doctor`/`new`/`dev`/`build`/`test`), one-call
-`honk::serve` API, zero-copy routing (`:params`, typed `param_int`, query +
-percent-decoding, headers), composable middleware, CORS, cookies, bearer auth,
-`HEAD`, stdlib JSON (`Reader` typed binding, DOM `parse`, `format_*` emit),
-kernel-`sendfile` static file serving, opt-in SQLite (WAL + prepared
-statements, zero-copy rows), strict `400`/`404`/`405` + `413`/`431`/`501` caps,
-idle + slowloris timeouts, `SO_REUSEPORT` multi-worker with CPU pinning, Linux
-`epoll`, Docker + GitHub Actions CI.
+**Today**: `./honk` CLI (`setup`/`doctor`/`new`/`dev`/`build`/`test`), single-import
+`honk` barrel, one-call `honk::listen` + declarative route API (`get`/`post`/`put`/`patch`/`delete`,
+`:params`, typed `get_int`/`patch_int`/`delete_int`, 2-param `get2`, `*` wildcards,
+automatic `404`/`405` tracking), streaming `app.json` writer + `body_*`/`require_str`
+extractors, query + percent-decoding, headers, composable guards, CORS, cookies,
+bearer auth, `HEAD`, kernel-`sendfile` static serving (`static_dir`), opt-in SQLite
+(WAL, one-line `sql_json`/`sql_json_one`/`insert_text`/`run_int` + low-level `Stmt`),
+strict `400`/`404`/`405` + `413`/`431`/`501` caps, idle + slowloris timeouts,
+`SO_REUSEPORT` multi-worker with CPU pinning, Linux `epoll`, Docker + GitHub Actions CI.
 
 **Not yet**: TLS (terminate at a reverse proxy), HTTP/2+, chunked request bodies
 (`501`), WebSockets. See [`docs/DECISIONS.md`](docs/DECISIONS.md) for the

@@ -1,65 +1,101 @@
 # Honk Guide — Recipes
 
-Copy-pasteable patterns for everyday backends. Every snippet lives inside the
-request block (`honk::request(fd, date) { ctx => … };`) — see
-[`QUICKSTART.md`](QUICKSTART.md) for the shell. Full reference: [`API.md`](API.md).
+Copy-pasteable patterns for everyday backends. Every snippet runs inside
+`honk::listen(port) { app => … };` after a single `import honk from "<honk>/src";`
+— see [`QUICKSTART.md`](QUICKSTART.md) for scaffolding and [`API.md`](API.md)
+for the complete reference.
 
-> Rule of thumb: blocks are inlined — never `return`/`break` inside them; nest
-> `if`/`else` instead. Unstaged requests answer `404` automatically.
+> Rule of thumb: blocks (`{ app => … }`) are inlined — never `return`/`break`
+> inside them; nest `if`/`else` instead (plain `fn`s called from a block *may*
+> `return`). First matching route wins; matched paths with the wrong method
+> answer `405`, everything else `404`.
+
+## Imports
+
+Apps import the `honk` barrel once (`./honk new` writes the path for you):
+
+```goose
+import honk from "../../src";                 // listen, App DSL, Ctx, static
+import honk.honk_sqlite.honk_sqlite;          // opt-in: only if you use SQLite
+```
 
 ## Routing
 
 ```goose
-if ctx.method == "GET" && ctx.path == "/health" {
-    ctx.text(200, "ok");
-} else if ctx.method == "GET" {
-    // Single segment: /users/:id  (zero-copy view into the request)
-    let seg, ok = match_1param(ctx.path, "/users/");
-    if ok {
-        ctx.params[0] = seg;
-        ctx.n_params = 1;
-        ctx.text(200, ctx.param_str(0));
-    }
-} else if ctx.method == "POST" && ctx.path == "/users" {
-    ...
-}
-```
+honk::listen(18080) { app =>
+    // Static literals (200 OK; GET + HEAD):
+    app.get("/health", "ok");
+    app.get_json_raw("/ready", "{\"ready\":true}");
 
-Typed params with validation:
+    // Block routes: get, post, put, patch, delete
+    app.post("/ping") { app.ok("pong"); };
 
-```goose
-let id, ok = ctx.param_int(0);   // strict i64, rejects "12x"/overflow
-if !ok {
-    ctx.json_error(400, "id must be an integer");
-} else {
-    ...
-}
-```
+    // Single string segment (/users/ada -> "ada", zero-copy slice):
+    app.get_param("/users/:name") { name => app.ok(name); };
 
-Wildcard + traversal guard (`/files/*rest`):
+    // Typed i64 segment (auto-400 JSON error if non-integer or overflowing):
+    app.get_int("/items/:id") { id =>
+        app.json() { j => j.int("id", id); };
+    };
+    app.patch_int("/items/:id") { id => app.ok_json(); };
+    app.delete_int("/items/:id") { id => app.no_content(); };
 
-```goose
-let rest, ok = ctx.rest("/files/");
-if ok && rest.has_dotdot() {
-    ctx.text(400, "Bad Request");
-} else if ok {
-    ctx.text(200, rest);   // serve from your store; rest is zero-copy
-}
+    // Two segments (/orgs/goose/repos/honk):
+    app.get2("/orgs/:org/repos/:repo") { org, repo =>
+        app.json() { j => j.str("org", org); j.str("repo", repo); };
+    };
+
+    // Wildcard tail (/files/a/b.txt -> "a/b.txt") + traversal guard:
+    app.get_wild("/files/*") { rest =>
+        if honk::has_dotdot(rest) {
+            app.text(400, "Bad Request");
+        } else {
+            app.ok(rest);
+        }
+    };
+};
 ```
 
 ## Query strings
 
 ```goose
-let name = ctx.query_str_or("name", "World");   // default when absent
-let page = ctx.query_int_or("page", 1);         // default when absent/invalid
+let name = app.query_str_or("name", "World");   // default when absent
+let page = app.query_int_or("page", 1);         // default when absent/invalid
 
-let q, ok = ctx.query_decoded("q");             // %XX-decoded, + → space
+let q, ok = app.query_decoded("q");             // %XX-decoded, + -> space
 if !ok {
-    ctx.text(400, "Bad Request");               // missing key or malformed hex
+    app.text(400, "Bad Request");               // missing key or malformed hex
 }
 ```
 
-## Typed JSON POST validation
+## JSON responses & body extraction
+
+Emit JSON without manual `\"` escaping or comma tracking via `app.json()` (`200`)
+and `app.created_json()` (`201`):
+
+```goose
+app.post("/signup") {
+    app.require_str("username") { u =>          // auto-400 if malformed/missing/empty
+        app.require_str("email") { e =>
+            let age, has_age = app.body_int("age");
+            let newsletter, _ = app.body_bool("newsletter");
+            app.created_json() { j =>
+                j.jbool("created", true);
+                j.str("username", u);
+                j.str("email", e);
+                j.jbool("newsletter", newsletter);
+                if has_age { j.int("age", age); }
+            };
+        };
+    };
+};
+```
+
+`body_str`, `body_int`, `body_bool`, and `require_str` parse `app.body` at most
+once per request into `app.dom`/`app.dstr` (reset automatically after each request).
+
+Need maximum hot-path throughput with zero DOM nodes? Stream directly with
+`json::Reader`:
 
 ```goose
 struct Signup { name: const u8[:], has_name: bool, age: i64, has_age: bool }
@@ -73,181 +109,165 @@ fn parse_signup(r: json::Reader&, scratch: u8[>..]&, s: Signup&) -> bool {
             s.age = json::read_int(r);
             s.has_age = true;
         } else {
-            json::skip(r);                            // unknown keys ignored
+            json::skip(r);
         }
     };
-    if !json::finish(r) { return false; }             // malformed/trailing?
-    if !s.has_name || !s.has_age { return false; }    // required?
-    return true;
-}
-
-// in the route:
-var s = Signup { name: "", .. };
-var r = json::reader(ctx.body);
-if !parse_signup(r, ctx.tmp, s) || s.name.len == 0 {
-    ctx.json_error(400, "name (string) and age (int) are required");
-} else {
-    ctx.res.append("{\"created\":true,\"name\":");
-    json::format_string(ctx.res, s.name);             // escaped in place
-    ctx.res.append(",\"age\":");
-    format(ctx.res, s.age);
-    ctx.res.push('}');
-    ctx.json_raw(201, ctx.res[..]);
+    return json::finish(r) && s.has_name && s.has_age && s.name.len > 0;
 }
 ```
 
-Dynamic JSON (unknown shape)? Use the DOM instead:
+## Bearer auth guard
 
 ```goose
-let d = dom_summary(ctx.body, ctx.dom, ctx.dstr);  // honk_json helper
-```
-
-## Bearer auth middleware
-
-```goose
-inline fn check_auth(c: Ctx&) -> bool {
-    let tok, ok = c.bearer_token();   // `Authorization: Bearer …`, any case
+inline fn check_auth(app: honk::Ctx&) -> bool {
+    let tok, ok = app.bearer_token();   // `Authorization: Bearer …`, any case
     if !ok {
-        c.text(401, "Unauthorized");
-        return false;                 // plain fns MAY return; blocks may not
+        app.text(401, "Unauthorized");
+        app.handled = true;             // claim request so later routes/405 skip it
+        return false;                   // plain fns MAY return; blocks may not
     }
-    c.user = tok;                     // decorate ctx for downstream handlers
-    c.authed = true;
+    app.user = tok;
+    app.authed = true;
     return true;
 }
 
-// in the block:
-if check_auth(ctx) {
-    ...protected routes, reading ctx.user...
-}
+// inside honk::listen:
+app.get("/private") {
+    if check_auth(app) {
+        app.ok(app.user);
+    }
+};
 ```
 
 ## CORS for React / Next.js / Vite
 
 ```goose
-if ctx.method == "OPTIONS" {
-    ctx.cors_preflight();             // 204 + allow-* headers, one line
-} else if ... {
-    ctx.cors_allow_all();             // or cors_with_origin("https://app.example")
-    ...stage the real response...
-}
+honk::listen(18080) { app =>
+    if app.method == "OPTIONS" {
+        app.cors_preflight();           // 204 + allow-* headers
+        app.handled = true;             // skip route matching / 405
+    } else {
+        app.cors_allow_all();           // or app.cors_with_origin("https://app.example")
+    }
+    app.get("/api/items") { app.ok_json(); };
+};
 ```
 
-## Cookies
+## Cookies, errors, redirects
 
 ```goose
-let sess, ok = ctx.cookie("sess");    // zero-copy lookup
-if ok { ... }
+let sess, ok = app.cookie("sess");      // zero-copy lookup
+app.set_cookie("sess", token, "Path=/; HttpOnly; Max-Age=3600");
 
-ctx.set_cookie("sess", token, "Path=/; HttpOnly; Max-Age=3600");
-ctx.text(200, "logged in");
+app.json_error(404, "no such widget");  // {"error":"…"} (escaped) + status
+app.ok_json();                          // 200 {"ok":true}
+app.no_content();                       // empty 204
+app.redirect("/login");                 // 302 + Location (or 301)
+app.html(200, "<h1>hi</h1>");
 ```
 
-## Errors, redirects, misc
+## Static files & SPAs (kernel `sendfile`)
 
 ```goose
-ctx.json_error(404, "no such widget");   // {"error":"…"} (escaped) + status
-ctx.no_content();                        // empty 204
-ctx.redirect("/login");                  // 302 + Location (or 301)
-ctx.html(200, "<h1>hi</h1>");
-```
-
-## Static files (kernel sendfile)
-
-```goose
-import honk_static from "/path/to/Honk/src/honk_static";
-
-// in the block (root is borrowed, never copied):
-if (ctx.method == "GET" || ctx.head_only) && try_serve_file(ctx, "public", true) {
-    // 200/HEAD staged: MIME + Content-Length + Date, bytes via sendfile.
-} else if (ctx.method == "GET" || ctx.head_only)
-    && serve_rel(ctx, "public", "index.html", false) {
-    // SPA fallback for unknown GET routes.
-} else {
-    ctx.json_error(404, "not found");
-}
+honk::listen(18080) { app =>
+    app.get("/api/health", "ok");
+    app.static_dir("/", "public");      // GET/HEAD files + directory index.html
+    app.get_wild("/*") { _rest =>       // SPA fallback for client-side routes
+        serve_rel(app, "public", "index.html", false);
+    };
+};
 ```
 
 Traversal (`..`), backslashes, NUL bytes, malformed `%XX`, symlinks, and
-non-regular files are rejected (`false` → your `404`); directories resolve
-to `index.html` when enabled; other methods stage `405`. Large files stream
-without blocking the worker (`EAGAIN` + `EPOLLOUT` resume inside the shim).
+non-regular files are rejected; non-`GET`/`HEAD` requests to mounted paths
+answer `405`. Large files stream directly from page cache via `sendfile`
+(`EAGAIN` + `EPOLLOUT` resume inside the C shim).
 
-## SQLite (opt-in, per-worker WAL)
+## SQLite (opt-in, WAL + one-line JSON queries)
 
-Add the shim + lib to your `.build` (only SQLite apps pay):
+Add the SQLite shim and `-lsqlite3` to your `.build` file (apps without it do
+not link `libsqlite3`):
 
 ```goose
-// myapp.build
+// main.build
 c_sources = ["<honk>/src/shim/honk_shim.c", "<honk>/src/shim/picohttpparser.c",
              "<honk>/src/shim/honk_sqlite_shim.c"];
 c_include = ["<honk>/src/shim"];
-c_libs = ["sqlite3"];   // needs libsqlite3-dev (or ~/.local/sqlite3)
+c_libs = ["sqlite3"];   // needs libsqlite3-dev (or ~/.local/sqlite3 via ./honk)
 ```
 
-Open one connection per worker and capture it (with prepared statements) in
-the request block — the worker-state pattern:
+Stream query results straight into JSON responses with `sql_json` /
+`sql_json_one` / `sql_json_one_text`, and run parameterized mutations with
+`insert_text` / `run_int`:
 
 ```goose
-import honk_sqlite from "/path/to/Honk/src/honk_sqlite";
+import std;
+import honk from "../../src";
+import honk.honk_sqlite.honk_sqlite;
 
-thread_fn worker(port: i32) {
-    honk::listen_or_abort(port);
-    let db, ok = db_open("app.db");
-    guard ok else { abort("db_open failed"); }
-    guard db_enable_wal(db) else { abort("wal failed"); }  // WAL+NORMAL+5s busy
-    let st_get, gok = db_prepare(db, "SELECT name FROM users WHERE id = ?1;");
-    guard gok else { abort("prepare failed"); }
-    honk::serve() { fd, date =>
-        honk::request(fd, date) { ctx =>
-            if ctx.method == "GET" && ctx.path == "/user" {
-                let id = ctx.query_int_or("id", -1);
-                if id > 0 && bind_int(st_get, 1, id) && stmt_step(st_get) == ROW {
-                    let nm, nok = col_text(st_get, 0, ctx.tmp);
-                    stmt_reset(st_get);
-                    if nok {
-                        ctx.res.append("{\"name\":");
-                        json::format_string(ctx.res, nm);
-                        ctx.res.push('}');
-                        ctx.json_raw(200, ctx.res[..]);
-                    } else {
-                        ctx.json_error(500, "read failed");
-                    }
+fn main() {
+    let db, ok = db_open("todos.db");
+    guard ok && db_enable_wal(db) else { abort("db setup failed"); }
+    guard db_exec(db, "CREATE TABLE IF NOT EXISTS todos(id INTEGER PRIMARY KEY, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);") else { abort("ddl failed"); }
+
+    honk::listen(18080) { app =>
+        app.get("/api/todos") {
+            app.sql_json(db, "SELECT id, title, done FROM todos ORDER BY id;");
+        };
+        app.get_int("/api/todos/:id") { id =>
+            app.sql_json_one(db, "SELECT id, title, done FROM todos WHERE id = ?1;", id);
+        };
+        app.post("/api/todos") {
+            app.require_str("title") { title =>
+                let id, iok = insert_text(db, "INSERT INTO todos(title) VALUES (?1);", title);
+                if !iok {
+                    app.json_error(500, "insert failed");
                 } else {
-                    stmt_reset(st_get);   // reset on EVERY path: reuse invariant
-                    ctx.json_error(404, "not found");
+                    app.created_json() { j => j.int("id", id); j.str("title", title); };
                 }
-            }
+            };
+        };
+        app.delete_int("/api/todos/:id") { id =>
+            let n, dok = run_int(db, "DELETE FROM todos WHERE id = ?1;", id);
+            if !dok { app.json_error(500, "delete failed"); }
+            else if n == 0 { app.json_error(404, "not found"); }
+            else { app.ok_json(); }
         };
     };
-    stmt_finalize(st_get);
     db_close(db);
+    db_shutdown();
 }
 ```
 
-Rules: run schema DDL once in `main` (concurrent DDL can abort); always
-`stmt_reset` after stepping (even on errors); `bind_text` (transient) by
-default, `bind_text_static` only for static/request lifetimes; call
-`db_shutdown()` in `main` after all workers join. Multi-worker WAL needs a
-POSIX filesystem (not a Windows/9P mount) for the `-shm` file.
+Need long-lived prepared statements across millions of requests or custom column
+reshaping (e.g. `0/1` → JSON `bool`, as in `examples/fullstack_todo/app.goose`)?
+Use `db_prepare` + `bind_*` + `stmt_step` + `col_*` + `stmt_reset` +
+`stmt_finalize`.
 
-## Production deployment
+SQLite rules:
+- Run schema DDL once in `main` before spawning multiple workers (concurrent DDL can abort with `SQLITE_SCHEMA`).
+- In multi-worker servers, open one `Db` handle per worker thread (`NOMUTEX`), finalize statements + `db_close(db)` when the worker exits, and call `db_shutdown()` once in `main` after `thread_wait`.
+- Always call `stmt_reset(st)` on *every* exit path when stepping a reusable `Stmt`.
+- Multi-worker WAL requires a POSIX filesystem (e.g. `/tmp` or native Linux ext4, not a Windows/9P mount) for the `-shm` file.
 
-- **Binary**: `./honk build my-api --release` → `my-api/dist/main`. Ship it as-is
-  (libc + pthreads only, ~150 KiB). Run `./main 8080`.
-- **Workers**: spawn N `thread_fn` workers (kernel `SO_REUSEPORT` balances);
-  see `src/server.goose` for the pinned multi-worker pattern.
-- **Reverse proxy** (TLS): terminate TLS in nginx/Caddy and proxy plain
-  HTTP/1.1 to Honk (static assets are served natively via `sendfile`). Example:
+## Multi-worker scaling & production deployment
+
+- **Single worker**: `honk::listen(port) { app => … };` runs directly on `main`.
+- **Multi-worker (`SO_REUSEPORT` + CPU pinning)**: put your `app.get/post/...`
+  routes in an `inline fn routes(app: honk::Ctx&)` and drive each `thread_fn`
+  worker with `honk::listen_cfg_or_abort(cfg)` +
+  `honk::serve() { fd, date => honk::request_app(fd, date) { app => routes(app); }; };`.
+- **Binary**: `./honk build my-api --release` → `my-api/dist/main` (~150 KiB,
+  libc + pthreads only). Run `./main 8080`.
+- **Reverse proxy (TLS)**: terminate TLS in nginx/Caddy and proxy HTTP/1.1 to
+  Honk:
   ```nginx
   server {
       listen 443 ssl;  # + certs
       location / { proxy_pass http://127.0.0.1:8080; }
   }
   ```
-- **systemd**: `ExecStart=/opt/my-api/main 8080`, `Restart=always`. Honk has no
-  graceful-drain hook yet — `SIGTERM` stops immediately; keep a `POST
-  /__shutdown`-style route calling `honk_request_stop()` if you want clean
-  in-flight draining before deploys.
-- **Docker**: copy the repo `Dockerfile` pattern (multi-stage, Goose pinned,
-  slim runtime).
+- **systemd / graceful drain**: `ExecStart=/opt/my-api/main 8080`, `Restart=always`.
+  `SIGTERM` stops immediately; expose an internal shutdown route calling
+  `honk_request_stop()` if you want in-flight turn draining before exit.
+- **Docker**: copy the repo `Dockerfile` pattern (multi-stage, pinned Goose, slim runtime).
