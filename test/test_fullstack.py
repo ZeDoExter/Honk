@@ -457,6 +457,11 @@ def test_fullstack_e2e(label):
             code, _, _ = read_response(s.makefile("rb"))
             assert code == 200, code
             s.close()
+            s, f = req(port, b"GET /api/todos HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            code, _, body = read_response(f)
+            assert code == 200 and pyjson.loads(body) == [
+                {"id": tid, "title": "e2e milk", "done": True}], body
+            s.close()
             s, f = req(port, b"DELETE /api/todos/99999 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             code, _, _ = read_response(f)
             assert code == 404, code

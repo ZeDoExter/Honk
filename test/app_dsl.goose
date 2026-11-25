@@ -1,12 +1,13 @@
-// test/app_dsl.goose -- exercises every honk_app DSL helper, SIGINT/SIGTERM
-// graceful outbound drain, and HONK_WORKERS / listen_workers fork scaling.
+// test/app_dsl.goose -- exercises unified pattern routing, named/indexed
+// params, suffix *_int routes, overloaded j.set, SIGINT/SIGTERM drain, and
+// HONK_WORKERS / listen_workers fork scaling.
 // Usage: ./app_dsl [port] [explicit_workers]
 
 import std;
 import os;
-import honk from "../src";
+import honk from "..";
 
-inline fn dsl_routes(app: honk::Ctx&) {
+fn dsl_routes(app: honk::Ctx&) {
     app.get("/", "dsl root");
     app.get_text("/txt", "plain literal");
     app.get_json_raw("/jraw", "{\"raw\":1}");
@@ -17,15 +18,17 @@ inline fn dsl_routes(app: honk::Ctx&) {
 
     app.get("/wid") {
         app.json() { j =>
-            j.int("worker", honk_worker_id() as! i64);
+            j.set("worker", honk_worker_id() as! i64);
         };
     };
 
+    // Overloaded j.set (str, i64, f64, bool) + jnull + raw.
     app.get("/jtypes") {
         app.json() { j =>
-            j.str("s", "a\"b");
-            j.int("i", -9);
-            j.jbool("b", true);
+            j.set("s", "a\"b");
+            j.set("i", -9);
+            j.set("f", 2.5);
+            j.set("b", true);
             j.jnull("n");
             j.raw("r", "[1,2]");
         };
@@ -39,9 +42,9 @@ inline fn dsl_routes(app: honk::Ctx&) {
             app.json_error(400, "missing typed fields");
         } else {
             app.created_json() { j =>
-                j.str("s", s);
-                j.int("n", n);
-                j.jbool("b", b);
+                j.set("s", s);
+                j.set("n", n);
+                j.set("b", b);
             };
         }
     };
@@ -56,36 +59,50 @@ inline fn dsl_routes(app: honk::Ctx&) {
     app.patch("/item") { app.ok("patched"); };
     app.delete("/item") { app.no_content(); };
 
-    app.get_param("/p/:slug") { slug =>
-        app.ok(slug);
+    // Unified pattern routing: named app.param("..."), app.param(0), suffix, /*
+    app.get("/p/:slug") {
+        app.ok(app.param("slug"));
     };
-
-    app.get_int("/i/:id") { id =>
-        app.json() { j => j.int("id", id); };
-    };
-    app.patch_int("/i/:id") { id =>
-        app.json() { j => j.int("patched", id); };
-    };
-    app.delete_int("/i/:id") { id =>
-        app.json() { j => j.int("deleted", id); };
-    };
-
-    app.get2("/orgs/:org/repos/:repo") { org, repo =>
+    app.get("/orgs/:org/repos/:repo") {
         app.json() { j =>
-            j.str("org", org);
-            j.str("repo", repo);
+            j.set("org", app.param("org"));
+            j.set("repo", app.param("repo"));
+            j.set("first_idx", app.param(0));
         };
     };
-
-    app.get_wild("/w/*") { rest =>
-        app.ok(rest);
-    };
-    app.patch_wild("/pw/") { rest =>
-        app.ok(rest);
+    app.get("/w/*") {
+        app.ok(app.tail);
     };
 
-    // 128 KiB response with shrunk SO_SNDBUF (16 KiB) so SIGTERM mid-flight
-    // exercises multi-round EPOLLOUT outbound drain within the 2s budget.
+    // Typed *_int routes across all methods, including literal suffixes!
+    app.get_int("/i/:id") { id =>
+        app.json() { j => j.set("id", id); };
+    };
+    app.post_int("/i/:id/clone") { id =>
+        app.created_json() { j => j.set("cloned", id); };
+    };
+    app.put_int("/i/:id/publish") { id =>
+        app.json() { j => j.set("published", id); };
+    };
+    app.patch_int("/i/:id/toggle") { id =>
+        app.json() { j => j.set("toggled", id); };
+    };
+    app.patch_int("/i/:id") { id =>
+        app.json() { j => j.set("patched", id); };
+    };
+    app.delete_int("/i/:id") { id =>
+        app.json() { j => j.set("deleted", id); };
+    };
+
+    // Legacy compat aliases
+    app.get_param("/compat/p/:x") { x => app.ok(x); };
+    app.get2("/compat/a/:x/b/:y") { x, y =>
+        app.json() { j => j.str("x", x); j.str("y", y); };
+    };
+    app.get_wild("/compat/w/*") { rest => app.ok(rest); };
+    app.patch_wild("/pw/") { rest => app.ok(rest); };
+
+    // 128 KiB response with shrunk SO_SNDBUF (16 KiB) for SIGTERM drain test.
     app.get("/bigstream") {
         honk_shrink_sndbuf(app.fd);
         for _ in 8192 {
@@ -96,13 +113,9 @@ inline fn dsl_routes(app: honk::Ctx&) {
 }
 
 fn main() {
-    var port: i32 = 18430;
+    let port = honk::arg_port(18430);
     var explicit_workers: i32 = -1;
     let a = args();
-    if a.len > 1 {
-        let v, ok = parse_int(a[1]);
-        if ok { port = v as! i32; }
-    }
     if a.len > 2 {
         let v, ok = parse_int(a[2]);
         if ok { explicit_workers = v as! i32; }

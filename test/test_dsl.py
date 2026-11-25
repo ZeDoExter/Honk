@@ -115,25 +115,40 @@ def test_methods_and_405_vs_404(port):
 def test_params_and_wildcards(port):
     assert req(port, "GET", "/p/hello-world")[0:3:2] == (200, b"hello-world")
     assert pyjson.loads(req(port, "GET", "/i/9223372036854775807")[2]) == {"id": 9223372036854775807}
+    assert pyjson.loads(req(port, "POST", "/i/15/clone", b"")[2]) == {"cloned": 15}
+    assert pyjson.loads(req(port, "PUT", "/i/22/publish", b"")[2]) == {"published": 22}
+    assert pyjson.loads(req(port, "PATCH", "/i/99/toggle", b"")[2]) == {"toggled": 99}
     assert pyjson.loads(req(port, "PATCH", "/i/-42", b"")[2]) == {"patched": -42}
     assert pyjson.loads(req(port, "DELETE", "/i/0")[2]) == {"deleted": 0}
 
-    for method, path in [("GET", "/i/abc"), ("PATCH", "/i/12x"), ("DELETE", "/i/9223372036854775808")]:
-        code, _, body = req(port, method, path, b"" if method == "PATCH" else None)
+    for method, path in [
+        ("GET", "/i/abc"),
+        ("POST", "/i/bad/clone"),
+        ("PUT", "/i/bad/publish"),
+        ("PATCH", "/i/bad/toggle"),
+        ("PATCH", "/i/12x"),
+        ("DELETE", "/i/9223372036854775808"),
+    ]:
+        code, _, body = req(port, method, path, b"" if method in ("POST", "PUT", "PATCH") else None)
         assert code == 400 and pyjson.loads(body) == {"error": "path parameter must be an integer"}, (method, path, code, body)
 
     code, _, body = req(port, "GET", "/orgs/goose-lang/repos/honk")
-    assert code == 200 and pyjson.loads(body) == {"org": "goose-lang", "repo": "honk"}
+    assert code == 200 and pyjson.loads(body) == {"org": "goose-lang", "repo": "honk", "first_idx": "goose-lang"}
 
     assert req(port, "GET", "/w/a/b/c.txt")[0:3:2] == (200, b"a/b/c.txt")
     assert req(port, "PATCH", "/pw/123/toggle", b"")[0:3:2] == (200, b"123/toggle")
+
+    # Backward-compatible aliases
+    assert req(port, "GET", "/compat/p/ok")[0:3:2] == (200, b"ok")
+    assert pyjson.loads(req(port, "GET", "/compat/a/1/b/2")[2]) == {"x": "1", "y": "2"}
+    assert req(port, "GET", "/compat/w/x/y")[0:3:2] == (200, b"x/y")
     print("  [PASS] test_params_and_wildcards")
 
 
 def test_jwriter_and_body_helpers(port):
     code, _, body = req(port, "GET", "/jtypes")
     assert code == 200
-    assert pyjson.loads(body) == {"s": 'a"b', "i": -9, "b": True, "n": None, "r": [1, 2]}
+    assert pyjson.loads(body) == {"s": 'a"b', "i": -9, "f": 2.5, "b": True, "n": None, "r": [1, 2]}
 
     code, _, body = req(port, "POST", "/echo-json", b'{"s":"hi\\n","n":77,"b":false,"extra":[1]}')
     assert code == 201 and pyjson.loads(body) == {"s": "hi\n", "n": 77, "b": False}

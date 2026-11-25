@@ -7,8 +7,8 @@
 import std;
 import os;
 import json;
-import honk from "../src";
-import honk.honk_sqlite.honk_sqlite;
+import honk from "..";
+import honk_sqlite from "../sqlite";
 
 struct P5WorkerCfg {
     port: i32,

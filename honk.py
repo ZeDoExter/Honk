@@ -115,31 +115,24 @@ def cmd_setup(_args):
     return cmd_doctor([])
 
 
-SCAFFOLD_MAIN = '''// {name} -- a Honk application.
+HONK_GIT_SOURCE = "ZeDoExter/Honk@v0.3.0"
+
+SCAFFOLD_MAIN = '''// {name} -- a Honk application (no .build file needed).
 //
-// Run:  ./honk dev {name}        (auto-reload on save)
-// Build: ./honk build {name} --release
-// NOTE: blocks are inlined: never `return`/`break` inside them; use if/else.
+// Run:    ./honk dev {name}        (auto-reload on save)
+// Build:  ./honk build {name} --release
 
 import std;
-import os;
-import honk from "{root}/src";
+import honk from "{source}";
 
 fn main() {{
-    var port: i32 = 18080;
-    let a = args();
-    if a.len > 1 {{
-        let v, ok = parse_int(a[1]);
-        if ok {{ port = v as! i32; }}
-    }}
+    let port = honk::arg_port(18080);
     print("{name} listening on port ", port);
     flush_stdout();
     honk::listen(port) {{ app =>
-        app.get_text("/", "Hello from {name}!");
-        app.get_param("/users/:id") {{ id =>
-            app.json() {{ j =>
-                j.str("id", id);
-            }};
+        app.get("/", "Hello from {name}!");
+        app.get("/users/:id") {{
+            app.json() {{ j => j.set("id", app.param("id")); }};
         }};
         app.post("/users") {{
             app.require_str("name") {{ n =>
@@ -148,9 +141,9 @@ fn main() {{
                     app.json_error(400, "name (string) and age (int) are required");
                 }} else {{
                     app.created_json() {{ j =>
-                        j.jbool("created", true);
-                        j.str("name", n);
-                        j.int("age", age);
+                        j.set("created", true);
+                        j.set("name", n);
+                        j.set("age", age);
                     }};
                 }}
             }};
@@ -159,26 +152,42 @@ fn main() {{
 }}
 '''
 
-SCAFFOLD_BUILD = ('c_sources = ["{root}/src/shim/honk_shim.c", '
-                   '"{root}/src/shim/picohttpparser.c"];\n'
-                   'c_include = ["{root}/src/shim"];\n')
+
+def portable_source(dest_dir, use_git=False):
+    if use_git:
+        return HONK_GIT_SOURCE
+    try:
+        rel = os.path.relpath(HONK_ROOT, dest_dir).replace("\\", "/")
+        if not rel.startswith("."):
+            rel = "./" + rel
+        return rel
+    except ValueError:
+        return HONK_ROOT.replace("\\", "/")
 
 
 def cmd_new(args):
-    if not args:
-        print("usage: ./honk new <app-name>  (aliases: init)", file=sys.stderr)
+    use_git = False
+    pos = []
+    for a in args:
+        if a == "--git":
+            use_git = True
+        elif a.startswith("-"):
+            print(f"error: unknown flag {a} (supported: --git)", file=sys.stderr)
+            return 2
+        else:
+            pos.append(a)
+    if len(pos) != 1:
+        print("usage: ./honk new <app-name> [--git]  (aliases: init)", file=sys.stderr)
         return 2
-    name = args[0]
-    dest = os.path.abspath(name)
+    dest = os.path.abspath(pos[0])
     if os.path.exists(dest):
         print(f"error: {dest} already exists", file=sys.stderr)
         return 1
     os.makedirs(dest)
+    src = portable_source(dest, use_git=use_git)
     with open(os.path.join(dest, "main.goose"), "w") as f:
-        f.write(SCAFFOLD_MAIN.format(name=os.path.basename(dest), root=HONK_ROOT))
-    with open(os.path.join(dest, "main.build"), "w") as f:
-        f.write(SCAFFOLD_BUILD.format(root=HONK_ROOT))
-    print(f"scaffolded {dest}/ (main.goose + main.build)")
+        f.write(SCAFFOLD_MAIN.format(name=os.path.basename(dest), source=src))
+    print(f"scaffolded {dest}/main.goose (import honk from \"{src}\")")
     print(f"  ./honk dev {dest}     # run with auto-reload")
     print(f"  ./honk build {dest} --release")
     return 0
@@ -245,7 +254,7 @@ def build_app(goose_file, out_bin, asan=False):
     if uses_sqlite(goose_file):
         srcs.append(f"{shim}/honk_sqlite_shim.c")
         libs.append("-lsqlite3")
-    r = run([cc, "-O2", "-g", "-fsanitize=address,undefined",
+    r = run([cc, "-O1", "-g", "-fsanitize=address,undefined",
              "-fno-sanitize-recover=all", f"-I{shim}", f"-I{rt}", standalone,
              *srcs, "-o", out_bin, *libs], capture=True, env=env)
     try:
