@@ -5,8 +5,10 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.6.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v0.7.0";   // or relative "../Honk"
 import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
+import honk.src.honk_ws.honk_ws;            // opt-in: RFC 6455 WebSockets
+import honk.src.honk_openapi.honk_openapi;  // opt-in: OpenAPI 3.1.0 + Docs UI
 import honk_sqlite from "../Honk/sqlite";   // opt-in: SQLite (-lsqlite3)
 import honk.src.honk_test.honk_test;        // opt-in: in-memory unit tester
 ```
@@ -112,3 +114,8 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 
 - **Static**: `app.static_dir(prefix, root)`, `app.static_dir_cached(prefix, root, cache_ctl)` (kernel `sendfile` + automatic `ETag` / `304 Not Modified`), `app.embed(route, data, mime = "", cache_ctl = "")` (serves compile-time `embed_file(...)` bytes with FNV-1a `ETag` / `304`), `try_serve_file`, `serve_rel`, `mime_for_rel`.
 - **SQLite**: `db_connect(path, schema = "")`, `app.sql_json(db, sql)` (`BOOLEAN`/`BOOL` columns auto-emit `true`/`false`), `app.sql_json_one(db, sql, id)`, `app.sql_json_one_text(db, sql, val)`, `insert_text(db, sql, text)`, `run_int(db, sql, id)`, `db_open/db_enable_wal/db_exec/db_close/db_shutdown`, `db_prepare/stmt_finalize/stmt_step/stmt_reset`, `bind_int/float/text/text_static/null`, `col_int/float/is_null/text/name`, `db_last_id/db_changes`.
+
+## WebSockets (`import honk.src.honk_ws.honk_ws;`) & OpenAPI (`import honk.src.honk_openapi.honk_openapi;`)
+
+- **WebSockets (`RFC 6455`)**: `app.ws(route) { ws => … };` (`101 Switching Protocols` + `426`/`400` validation), `ws.each_msg() { msg => … };`, `ws.recv_into(buf) -> slice, opcode, ok`, `ws.send(text)`, `ws.send_bytes(data)`, `ws.send_json() { j => … };`, `ws.ping(payload = "")`, `ws.close(code = 1000)`, `ws.set_timeout(ms)`, `honk::sha1(msg)`, `honk::b64_encode(src, out)`, `honk::ws_accept_key(key, out)`.
+- **OpenAPI `3.1.0` & Docs UI**: `app.openapi(route, title, version) { spec => … };` (`spec.desc`, `spec.server`, `spec.bearer_auth`, `spec.op`, `spec.op_int`, `spec.op_body`, `spec.op_auth` — auto `:param` → `{param}` conversion and same-path operation merging), `app.docs(route, spec_url, title = "API Reference")`.
