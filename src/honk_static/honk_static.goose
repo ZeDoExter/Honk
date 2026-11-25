@@ -60,10 +60,48 @@ inline fn embed(app: honk::Ctx&, route: const u8[:], data: const u8[:],
         app.resp_len = 0;
         app.responded = true;
     } else {
-        app.status = 200;
-        app.ctype = ctype;
-        app.resp_body = data;
-        app.responded = true;
+        let rg, has_rg = app.header("Range");
+        // Embed ETags are strong: an exact echo keeps the range; anything else
+        // (dates included — embeds carry no mtime) falls back to 200.
+        let irv_e, has_irv_e = app.header("If-Range");
+        let range_ok_e = if !has_irv_e { true } else { irv_e == etag };
+        if has_rg && range_ok_e {
+            let rs, re, rok, runsat = parse_range(rg, data.len);
+            if runsat {
+                let ustart = app.tmp.len;
+                app.tmp.append("bytes */");
+                format(app.tmp, data.len);
+                app.set_header("Content-Range", app.tmp[ustart..]);
+                app.status = 416;
+                app.ctype = ctype;
+                app.resp_body = "";
+                app.resp_len = 0;
+                app.responded = true;
+            } else if rok {
+                let rstart = app.tmp.len;
+                app.tmp.append("bytes ");
+                format(app.tmp, rs);
+                app.tmp.push('-');
+                format(app.tmp, re);
+                app.tmp.push('/');
+                format(app.tmp, data.len);
+                app.set_header("Content-Range", app.tmp[rstart..]);
+                app.status = 206;
+                app.ctype = ctype;
+                app.resp_body = data[rs..re + 1];
+                app.responded = true;
+            } else {
+                app.status = 200;
+                app.ctype = ctype;
+                app.resp_body = data;
+                app.responded = true;
+            }
+        } else {
+            app.status = 200;
+            app.ctype = ctype;
+            app.resp_body = data;
+            app.responded = true;
+        }
     }
     app.handled = true;
 }
@@ -434,6 +472,8 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     format(c.tmp, size);
     c.tmp.push('-');
     format(c.tmp, mtime);
+    if enc == "br" { c.tmp.append("-br"); }
+    else if enc == "gzip" { c.tmp.append("-gz"); }
     c.tmp.push('"');
     let etag = c.tmp[estart..];
     let lm = http_date(mtime, c.tmp);
@@ -442,6 +482,8 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     if has_inm && (inm == etag || inm == "*") {
         c.set_header("ETag", etag);
         c.set_header("Last-Modified", lm);
+        c.set_header("Vary", "Accept-Encoding");
+        if enc.len > 0 { c.set_header("Content-Encoding", enc); }
         if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
         c.status = 304;
         c.ctype = mime;
@@ -517,8 +559,25 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     if c.head_only || size == 0 {
         c.set_header("ETag", etag);
         c.set_header("Last-Modified", lm);
+        c.set_header("Accept-Ranges", "bytes");
+        c.set_header("Vary", "Accept-Encoding");
+        if enc.len > 0 { c.set_header("Content-Encoding", enc); }
         if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
-        c.status = 200;
+        if has_range {
+            let rstart = c.tmp.len;
+            c.tmp.append("bytes ");
+            format(c.tmp, rs);
+            c.tmp.push('-');
+            format(c.tmp, re);
+            c.tmp.push('/');
+            format(c.tmp, size);
+            c.set_header("Content-Range", c.tmp[rstart..]);
+            c.status = 206;
+            c.resp_len = re - rs + 1;
+        } else {
+            c.status = 200;
+            c.resp_len = size;
+        }
         c.ctype = mime;
         c.resp_body = "";
         c.responded = true;
@@ -527,7 +586,11 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     }
 
     let hstart = c.res.len;
-    c.res.append("HTTP/1.1 200 OK\r\nContent-Type: ");
+    if has_range {
+        c.res.append("HTTP/1.1 206 Partial Content\r\nContent-Type: ");
+    } else {
+        c.res.append("HTTP/1.1 200 OK\r\nContent-Type: ");
+    }
     c.res.append(mime);
     c.res.append("\r\nDate: ");
     c.res.append(c.date);
@@ -562,8 +625,9 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     c.res.append("\r\n\r\n");
     c.resp_hdrs = c.res[hstart..];
     c.resp_file_fd = fd;
-    c.resp_file_n = size;
-    c.status = 200;
+    c.resp_file_off = if has_range { rs } else { 0 };
+    c.resp_file_n = body_n;
+    c.status = if has_range { 206 } else { 200 };
     c.responded = true;
     c.sent = true;
     return true;
