@@ -112,7 +112,9 @@ inline fn req<F>(t: Tester&, method: const u8[:], target: const u8[:],
                        "Thu, 01 Jan 1970 00:00:00 GMT",
                        res_buf, tmp_buf, dom_buf, dstr_buf);
     app_run(ctx) { c => F(c); };
-    ctx.emit(tx_buf, ctx.date);
+    if !ctx.sent {
+        ctx.emit(tx_buf, ctx.date);
+    }
 
     t.status = ctx.status;
 
@@ -127,20 +129,24 @@ inline fn req<F>(t: Tester&, method: const u8[:], target: const u8[:],
     t.body_len = bl;
 
     // Extract emitted header block (between status line and \r\n\r\n).
+    // Static file responses (`ctx.sent`) stage headers in `resp_hdrs`
+    // instead of `emit`; capture those so status/ETag/Content-Length
+    // assertions work in memory (file bytes stay transport-level).
+    let eb = if ctx.sent { ctx.resp_hdrs } else { tx_buf[..] };
     var line1 = -1;
-    var hdr_end = tx_buf.len;
+    var hdr_end = eb.len;
     var k: i64 = 0;
-    while k + 1 < tx_buf.len {
-        if tx_buf[k] == '\r' && tx_buf[k + 1] == '\n' {
+    while k + 1 < eb.len {
+        if eb[k] == '\r' && eb[k + 1] == '\n' {
             if line1 < 0 { line1 = k + 2; }
-            if k + 3 < tx_buf.len && tx_buf[k + 2] == '\r' && tx_buf[k + 3] == '\n' {
+            if k + 3 < eb.len && eb[k + 2] == '\r' && eb[k + 3] == '\n' {
                 hdr_end = k + 2;
                 break;
             }
         }
         k++;
     }
-    let hs = if line1 >= 0 && line1 <= hdr_end { tx_buf[line1..hdr_end] } else { tx_buf[..0] };
+    let hs = if line1 >= 0 && line1 <= hdr_end { eb[line1..hdr_end] } else { eb[..0] };
     let hl = if hs.len <= 4096 { hs.len } else { 4096 };
     for i in hl { t.hdr_buf[i] = hs[i]; }
     t.hdr_len = hl;
