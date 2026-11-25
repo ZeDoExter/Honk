@@ -64,6 +64,10 @@ def setup_fixtures(tag):
     big = bytes((i * 2654435761) % 256 for i in range(2 * 1024 * 1024))
     with open(os.path.join(root, "big.bin"), "wb") as f:
         f.write(big)
+    with open(os.path.join(root, "clip.mp4"), "wb") as f:
+        f.write(b"\x00\x00\x00\x18ftypmp42-test-bytes")
+    with open(os.path.join(root, "song.mp3"), "wb") as f:
+        f.write(b"ID3-test-bytes")
     os.symlink("/etc/hostname", os.path.join(root, "evil-link"))
     os.mkfifo(os.path.join(root, "myfifo"))
     dbpath = os.path.join(root, "t.db")
@@ -81,6 +85,8 @@ def test_static_exact(port, root):
         (b"/style.css", b"style.css", b"text/css"),
         (b"/data.json", b"data.json", b"application/json"),
         (b"/readme.txt", b"readme.txt", b"text/plain"),
+        (b"/clip.mp4", b"clip.mp4", b"video/mp4"),
+        (b"/song.mp3", b"song.mp3", b"audio/mpeg"),
         (b"/sub/", b"sub/index.html", b"text/html"),
     ]
     for target, rel, ctype in cases:
@@ -99,14 +105,18 @@ def test_static_exact(port, root):
     assert len(body) == 2 * 1024 * 1024, len(body)
     s.close()
     # ETag + conditional If-None-Match -> 304 Not Modified (zero body).
+    # Both 200 and 304 carry a well-formed IMF-fixdate Last-Modified.
     s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
     code, hdrs, _ = read_response(f)
     s.close()
     etag = hdrs.get(b"etag", b"")
+    lm = hdrs.get(b"last-modified", b"")
     assert code == 200 and etag.startswith(b'W/"'), hdrs
+    assert len(lm) == 29 and lm.endswith(b" GMT") and lm[3:4] == b",", hdrs
     s, f = req(port, b"GET /app.js HTTP/1.1\r\nHost: x\r\nIf-None-Match: " + etag + b"\r\nConnection: close\r\n\r\n")
     code, hdrs304, _ = read_response(f, skip_body=True)
     assert code == 304 and hdrs304.get(b"etag") == etag and f.read() == b"", (code, hdrs304)
+    assert hdrs304.get(b"last-modified") == lm, hdrs304
     s.close()
     print("  [PASS] test_static_exact")
 

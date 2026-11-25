@@ -107,7 +107,63 @@ fn mime_for_rel(rel: const u8[:]) -> const u8[:] {
     if ext_eq(ext, "wasm") { return "application/wasm"; }
     if ext_eq(ext, "txt") { return "text/plain"; }
     if ext_eq(ext, "woff2") { return "font/woff2"; }
+    if ext_eq(ext, "woff") { return "font/woff"; }
+    if ext_eq(ext, "mp4") { return "video/mp4"; }
+    if ext_eq(ext, "webm") { return "video/webm"; }
+    if ext_eq(ext, "ogv") { return "video/ogg"; }
+    if ext_eq(ext, "mp3") { return "audio/mpeg"; }
+    if ext_eq(ext, "wav") { return "audio/wav"; }
+    if ext_eq(ext, "ogg") { return "audio/ogg"; }
+    if ext_eq(ext, "avif") { return "image/avif"; }
+    if ext_eq(ext, "gif") { return "image/gif"; }
+    if ext_eq(ext, "pdf") { return "application/pdf"; }
+    if ext_eq(ext, "xml") { return "application/xml"; }
     return "application/octet-stream";
+}
+
+// Format unix epoch seconds as an RFC 9110 IMF-fixdate
+// (`Sun, 06 Nov 1994 08:49:37 GMT`). Pure Goose (Howard Hinnant
+// civil_from_days), no FFI; clamps negative input to the epoch.
+fn http_date(mtime: i64, out: u8[>..]&) -> const u8[:] {
+    let t = if mtime > 0 { mtime } else { 0 };
+    let days = t / 86400;
+    let secs = t % 86400;
+    let hh = secs / 3600;
+    let mm = (secs % 3600) / 60;
+    let ss = secs % 60;
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    var y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    var m = mp + 3;
+    if mp >= 10 { m = mp - 9; y++; }
+    let wday = (days + 4) % 7;
+    let wdays = "SunMonTueWedThuFriSat";
+    let months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    let start = out.len;
+    out.append(wdays[wday * 3 .. wday * 3 + 3]);
+    out.append(", ");
+    if d < 10 { out.push('0'); }
+    format(out, d);
+    out.push(' ');
+    out.append(months[(m - 1) * 3 .. (m - 1) * 3 + 3]);
+    out.push(' ');
+    format(out, y);
+    out.push(' ');
+    if hh < 10 { out.push('0'); }
+    format(out, hh);
+    out.push(':');
+    if mm < 10 { out.push('0'); }
+    format(out, mm);
+    out.push(':');
+    if ss < 10 { out.push('0'); }
+    format(out, ss);
+    out.append(" GMT");
+    return out[start..];
 }
 
 fn try_serve_file(c: honk::Ctx&, root: const u8[:], with_index: bool) -> bool {
@@ -188,10 +244,12 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     format(c.tmp, mtime);
     c.tmp.push('"');
     let etag = c.tmp[estart..];
+    let lm = http_date(mtime, c.tmp);
 
     let inm, has_inm = c.header("If-None-Match");
     if has_inm && (inm == etag || inm == "*") {
         c.set_header("ETag", etag);
+        c.set_header("Last-Modified", lm);
         if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
         c.status = 304;
         c.ctype = mime;
@@ -204,6 +262,7 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
 
     if c.head_only || size == 0 {
         c.set_header("ETag", etag);
+        c.set_header("Last-Modified", lm);
         if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
         c.status = 200;
         c.ctype = mime;
@@ -221,6 +280,8 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
     c.res.append(c.date);
     c.res.append("\r\nETag: ");
     c.res.append(etag);
+    c.res.append("\r\nLast-Modified: ");
+    c.res.append(lm);
     if cache_ctl.len > 0 {
         c.res.append("\r\nCache-Control: ");
         c.res.append(cache_ctl);
