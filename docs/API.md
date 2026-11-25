@@ -5,7 +5,8 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.4.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v0.5.0";   // or relative "../Honk"
+import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
 import honk_sqlite from "../Honk/sqlite";   // opt-in: SQLite (-lsqlite3)
 import honk.src.honk_test.honk_test;        // opt-in: in-memory unit tester
 ```
@@ -24,7 +25,9 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 | `app.group(prefix) { … };` | Nestable zero-alloc route prefix group (`"/api/v1"`); skips block in one branch when prefix misses |
 | `app.cors()` / `app.cors(origin)` | One-line CORS headers + automatic `204` `OPTIONS` preflight (`handled = true`) |
 | `app.bearer() { tok => … };` | Scoped Bearer auth guard; runs block on valid token, else stages `401` (`handled = true`) |
-| `app.json_errors()` | Emits `application/json` `{"error":...}` for default `404` / `405` / `401` responses |
+| `app.rate_limit(max_reqs, window_sec)` / `app.rate_limit_key(key, max, win)` | Lazy thread-local fixed-window limiter; sets `X-RateLimit-Remaining` or `429` + `Retry-After` |
+| `app.client_ip()` / `app.real_ip()` | Socket peer IPv4 / proxy-aware IP (`X-Forwarded-For`, `X-Real-IP`) |
+| `app.json_errors()` | Emits `application/json` `{"error":...}` for default `404` / `405` / `401` / `429` responses |
 | `app.server_timing()` | Attaches `Server-Timing: honk;dur=<ms>.<us>` measured via `CLOCK_MONOTONIC` |
 | `app.after() { … };` | Resolves pending `404`/`405` first so `app.status` reflects the final status code |
 | `honk::listen_cfg(cfg)` / `honk::request_app(fd, date)` / `honk::app_run(ctx)` | Configurable / `thread_fn` entry points |
@@ -86,7 +89,20 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 `ctx.set_cookie(name, val, opts = "")`, `ctx.cors_allow_all/cors_with_origin/cors_preflight`,
 `honk::status_text(code)`, `ctx.emit(out, date)`.
 
+## Auth: JWT (`HS256`) & Signed Cookies (`import honk.src.honk_auth.honk_auth;`)
+
+| Signature | Notes |
+|---|---|
+| `app.jwt_issue(secret, sub, ttl_sec) -> token` | Emits signed `{"sub":...,"iat":...,"exp":...}` HS256 JWT into `app.tmp` |
+| `app.jwt(secret) { claims => … };` | Verifies `Bearer <jwt>` (constant-time MAC + `alg=="HS256"` + `exp`/`nbf`), sets `app.user`, or stages `401` |
+| `app.jwt_claim_str(claims, key)` / `app.jwt_claim_int(claims, key)` | Extract typed claim from verified payload JSON |
+| `honk::jwt_sign(payload_json, secret, out)` / `honk::jwt_verify(tok, secret, scratch)` | Low-level HS256 sign & verify |
+| `app.set_signed_cookie(name, val, secret, opts = ...)` | HMAC-SHA256 cookie (`name=val.<sig>`, binds `name` against swap attacks) |
+| `app.signed_cookie(name, secret) -> val, bool` | Constant-time verified cookie lookup |
+| `app.delete_cookie(name, path = "/")` | Expires cookie (`Max-Age=0; HttpOnly`, in `honk_ctx`) |
+| `honk::sha256(msg)` / `hmac_sha256(key, msg)` / `b64url_encode` / `b64url_decode` / `ct_eq` | Pure-Goose RFC 6234 / 2104 / 4648 primitives |
+
 ## Static files (`honk_static`) & SQLite (`sqlite/honk_sqlite`)
 
-- **Static**: `app.static_dir(prefix, root)`, `try_serve_file(ctx, root, with_index)`, `serve_rel(ctx, root, rel, with_index)`, `mime_for_rel(rel)`.
+- **Static**: `app.static_dir(prefix, root)`, `app.static_dir_cached(prefix, root, cache_ctl)` (kernel `sendfile` + automatic `ETag` / `304 Not Modified`), `app.embed(route, data, mime = "", cache_ctl = "")` (serves compile-time `embed_file(...)` bytes with FNV-1a `ETag` / `304`), `try_serve_file`, `serve_rel`, `mime_for_rel`.
 - **SQLite**: `db_connect(path, schema = "")`, `app.sql_json(db, sql)` (`BOOLEAN`/`BOOL` columns auto-emit `true`/`false`), `app.sql_json_one(db, sql, id)`, `app.sql_json_one_text(db, sql, val)`, `insert_text(db, sql, text)`, `run_int(db, sql, id)`, `db_open/db_enable_wal/db_exec/db_close/db_shutdown`, `db_prepare/stmt_finalize/stmt_step/stmt_reset`, `bind_int/float/text/text_static/null`, `col_int/float/is_null/text/name`, `db_last_id/db_changes`.
