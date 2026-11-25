@@ -165,6 +165,170 @@ fn http_date(mtime: i64, out: u8[>..]&) -> const u8[:] {
     out.append(" GMT");
     return out[start..];
 }
+// Parse a single `Range: bytes=<s>-<e>` / `<s>-` / `-<suffix>` against `size`.
+// Returns (start, end_inclusive, ok, unsatisfiable): malformed, unit-mismatch,
+// or multi-range input yields ok=false (caller serves 200). Unsatisfiable
+// (start >= size, start > end, `-0`, or any range on an empty representation)
+// yields unsatisfiable=true (caller serves 416). Endpoints clamp to `size - 1`.
+fn parse_range(hdr: const u8[:], size: i64) -> i64, i64, bool, bool {
+    var p: i64 = 0;
+    while p < hdr.len && (hdr[p] == ' ' || hdr[p] == '\t') { p++; }
+    if p + 5 > hdr.len { return 0, 0, false, false; }
+    let unit = "bytes";
+    for k in 5 {
+        if !honk::eq_ci(hdr[p + k], unit[k]) { return 0, 0, false, false; }
+    }
+    p += 5;
+    while p < hdr.len && (hdr[p] == ' ' || hdr[p] == '\t') { p++; }
+    if p >= hdr.len || hdr[p] != '=' { return 0, 0, false, false; }
+    p++;
+    while p < hdr.len && (hdr[p] == ' ' || hdr[p] == '\t') { p++; }
+    for ch in hdr[p..] {
+        if ch == ',' { return 0, 0, false, false; }
+    }
+    var has_start = false;
+    var start: i64 = 0;
+    while p < hdr.len && hdr[p] >= '0' && hdr[p] <= '9' {
+        has_start = true;
+        let d: i64 = hdr[p] - '0';
+        if start > (9223372036854775807 - d) / 10 { start = 9223372036854775807; }
+        else { start = start * 10 + d; }
+        p++;
+    }
+    if p >= hdr.len || hdr[p] != '-' { return 0, 0, false, false; }
+    p++;
+    var has_end = false;
+    var end: i64 = 0;
+    while p < hdr.len && hdr[p] >= '0' && hdr[p] <= '9' {
+        has_end = true;
+        let d: i64 = hdr[p] - '0';
+        if end > (9223372036854775807 - d) / 10 { end = 9223372036854775807; }
+        else { end = end * 10 + d; }
+        p++;
+    }
+    while p < hdr.len && (hdr[p] == ' ' || hdr[p] == '\t') { p++; }
+    if p != hdr.len { return 0, 0, false, false; }
+    if size <= 0 { return 0, 0, false, true; }
+    if !has_start && !has_end { return 0, 0, false, false; }
+    if !has_start {
+        if end <= 0 { return 0, 0, false, true; }
+        let n = if end > size { size } else { end };
+        return size - n, size - 1, true, false;
+    }
+    if start >= size { return 0, 0, false, true; }
+    let e = if !has_end || end >= size { size - 1 } else { end };
+    if e < start { return 0, 0, false, true; }
+    return start, e, true, false;
+}
+inline fn digits2(s: const u8[:], o: i64) -> i64, bool {
+    if s[o] < '0' || s[o] > '9' || s[o + 1] < '0' || s[o + 1] > '9' { return 0, false; }
+    return (s[o] - '0') * 10 + (s[o + 1] - '0'), true;
+}
+
+// Parse an RFC 9110 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) to unix
+// epoch seconds (pure Goose, inverse of `http_date`). Strict 29-byte shape;
+// false on any deviation. Years before 1970 clamp to the epoch.
+fn parse_imf_date(s: const u8[:]) -> i64, bool {
+    if s.len != 29 { return 0, false; }
+    for k in 3 {
+        if !ascii::is_alpha(s[k]) { return 0, false; }
+    }
+    if s[3] != ',' || s[4] != ' ' { return 0, false; }
+    if s[7] != ' ' || s[11] != ' ' || s[16] != ' ' { return 0, false; }
+    if s[19] != ':' || s[22] != ':' { return 0, false; }
+    if s[25] != ' ' || s[26] != 'G' || s[27] != 'M' || s[28] != 'T' { return 0, false; }
+    let d, dok = digits2(s, 5);
+    let hh, hok = digits2(s, 17);
+    let mm, mok = digits2(s, 20);
+    let ss, sok = digits2(s, 23);
+    if !dok || !hok || !mok || !sok { return 0, false; }
+    var y: i64 = 0;
+    var yi: i64 = 12;
+    while yi < 16 {
+        if s[yi] < '0' || s[yi] > '9' { return 0, false; }
+        y = y * 10 + (s[yi] - '0');
+        yi++;
+    }
+    let months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    var m: i64 = 0;
+    var mi: i64 = 0;
+    while mi < 12 {
+        if s[8] == months[mi * 3] && s[9] == months[mi * 3 + 1] && s[10] == months[mi * 3 + 2] {
+            m = mi + 1;
+            break;
+        }
+        mi++;
+    }
+    if m == 0 { return 0, false; }
+    if d < 1 || d > 31 || hh > 23 || mm > 59 || ss > 59 { return 0, false; }
+    if y < 1970 { return 0, true; }
+    var yy = y;
+    if m <= 2 { yy--; }
+    let era = yy / 400;
+    let yoe = yy - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    return days * 86400 + hh * 3600 + mm * 60 + ss, true;
+}
+// Case-insensitive `Accept-Encoding` token match with `q=0` refusal honored
+// (`gzip;q=0` does NOT match). Longer tokens sharing the prefix don't match.
+fn ae_has_token(hdr: const u8[:], tok: const u8[:]) -> bool {
+    if hdr.len < tok.len { return false; }
+    var i: i64 = 0;
+    while i + tok.len <= hdr.len {
+        var ok = true;
+        for k in tok.len {
+            if !honk::eq_ci(hdr[i + k], tok[k]) { ok = false; break; }
+        }
+        if ok {
+            let left_ok = i == 0 || hdr[i - 1] == ' ' || hdr[i - 1] == '\t' || hdr[i - 1] == ',';
+            if left_ok {
+                var r = i + tok.len;
+                while r < hdr.len && (hdr[r] == ' ' || hdr[r] == '\t') { r++; }
+                if r >= hdr.len || hdr[r] == ',' { return true; }
+                if hdr[r] == ';' {
+                    var q = r;
+                    var refused = false;
+                    while q < hdr.len && hdr[q] != ',' {
+                        if (hdr[q] == 'q' || hdr[q] == 'Q') && q + 1 < hdr.len && hdr[q + 1] == '=' {
+                            var v = q + 2;
+                            while v < hdr.len && (hdr[v] == ' ' || hdr[v] == '\t') { v++; }
+                            if v < hdr.len && hdr[v] == '0' {
+                                var w = v + 1;
+                                var allzero = true;
+                                if w < hdr.len && hdr[w] == '.' {
+                                    w++;
+                                    while w < hdr.len && hdr[w] >= '0' && hdr[w] <= '9' {
+                                        if hdr[w] != '0' { allzero = false; }
+                                        w++;
+                                    }
+                                }
+                                if allzero { refused = true; }
+                            }
+                        }
+                        q++;
+                    }
+                    if !refused { return true; }
+                }
+            }
+        }
+        i++;
+    }
+    return false;
+}
+// True for MIME types worth precompressing (text, JSON/XML, SVG, WASM).
+// Media, fonts, and archives are already compressed: probing sidecars for
+// them would only waste openat syscalls.
+inline fn mime_is_compressible(m: const u8[:]) -> bool {
+    if m.len >= 5 && m[..5] == "text/" { return true; }
+    if m == "application/json" { return true; }
+    if m == "image/svg+xml" { return true; }
+    if m == "application/xml" { return true; }
+    if m == "application/wasm" { return true; }
+    return false;
+}
 
 fn try_serve_file(c: honk::Ctx&, root: const u8[:], with_index: bool) -> bool {
     if c.method != "GET" && !c.head_only {
@@ -258,6 +422,68 @@ fn serve_rel_cached(c: honk::Ctx&, root: const u8[:], raw: const u8[:],
         c.responded = true;
         honk_file_close(fd);
         return true;
+    }
+
+    // RFC 9110 §13.2.2: If-None-Match present -> evaluate ETag ONLY, ignore IMS.
+    let ims, has_ims = c.header("If-Modified-Since");
+    if has_ims && !has_inm {
+        let it, iok = parse_imf_date(ims);
+        if iok && mtime <= it {
+            c.set_header("ETag", etag);
+            c.set_header("Last-Modified", lm);
+            c.set_header("Vary", "Accept-Encoding");
+            if enc.len > 0 { c.set_header("Content-Encoding", enc); }
+            if cache_ctl.len > 0 { c.set_header("Cache-Control", cache_ctl); }
+            c.status = 304;
+            c.ctype = mime;
+            c.resp_body = "";
+            c.resp_len = 0;
+            c.responded = true;
+            honk_file_close(fd);
+            return true;
+        }
+    }
+
+    // Single-range request? Invalid/multi-range falls back to 200 below;
+    // unsatisfiable short-circuits 416 here (INM/304 above takes precedence).
+    var rs: i64 = 0;
+    var re: i64 = -1;
+    var has_range = false;
+    let rg, has_rg = c.header("Range");
+    // If-Range gate: file ETags are weak (`W/…`), which per RFC 9110 §13.1.2
+    // never matches If-Range — only an exact Last-Modified date keeps the range.
+    var range_ok = true;
+    let irv, has_irv = c.header("If-Range");
+    if has_irv {
+        range_ok = false;
+        if irv.len > 0 && irv[0] != '"' && !(irv.len > 2 && irv[0] == 'W' && irv[1] == '/') {
+            let it2, iok2 = parse_imf_date(irv);
+            if iok2 && it2 == mtime { range_ok = true; }
+        }
+    }
+    if has_rg && range_ok {
+        let ps, pe, pok, punsat = parse_range(rg, size);
+        if punsat {
+            let cstart = c.tmp.len;
+            c.tmp.append("bytes */");
+            format(c.tmp, size);
+            c.set_header("Content-Range", c.tmp[cstart..]);
+            c.set_header("Accept-Ranges", "bytes");
+            c.set_header("Vary", "Accept-Encoding");
+            c.set_header("ETag", etag);
+            c.status = 416;
+            c.ctype = mime;
+            c.resp_body = "";
+            c.resp_len = 0;
+            c.responded = true;
+            honk_file_close(fd);
+            return true;
+        }
+        if pok {
+            rs = ps;
+            re = pe;
+            has_range = true;
+        }
     }
 
     if c.head_only || size == 0 {
