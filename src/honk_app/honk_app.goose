@@ -194,6 +194,53 @@ inline fn cors(app: Ctx&, origin: const u8[:]) {
         app.handled = true;
     }
 }
+// Configurable CORS: comma-separated origin allowlist (or "*"), exact-match
+// echo + `Vary: Origin` in allowlist mode (always, even on mismatch, so
+// reverse-proxy caches cannot poison). `credentials` is silently ignored
+// with "*" (forbidden combination). Automatic `204` on `OPTIONS`.
+inline fn cors_cfg(app: Ctx&, allow: const u8[:],
+                   methods: const u8[:] = "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                   headers: const u8[:] = "Content-Type, Authorization",
+                   max_age: i64 = 0, credentials: bool = false) {
+    if app.handled { return; }
+    if allow == "*" {
+        app.set_header("Access-Control-Allow-Origin", "*");
+        app.set_header("Access-Control-Allow-Methods", methods);
+        app.set_header("Access-Control-Allow-Headers", headers);
+        if max_age > 0 {
+            let mstart = app.tmp.len;
+            format(app.tmp, max_age);
+            app.set_header("Access-Control-Max-Age", app.tmp[mstart..]);
+        }
+        if app.method == "OPTIONS" {
+            app.no_content();
+            app.handled = true;
+        }
+        return;
+    }
+    app.set_header("Vary", "Origin");
+    let origin, ook = app.header("Origin");
+    if ook {
+        let matched, mok = cors_match_origin(origin, allow);
+        if mok {
+            app.set_header("Access-Control-Allow-Origin", matched);
+            app.set_header("Access-Control-Allow-Methods", methods);
+            app.set_header("Access-Control-Allow-Headers", headers);
+            if credentials {
+                app.set_header("Access-Control-Allow-Credentials", "true");
+            }
+            if max_age > 0 {
+                let astart = app.tmp.len;
+                format(app.tmp, max_age);
+                app.set_header("Access-Control-Max-Age", app.tmp[astart..]);
+            }
+        }
+    }
+    if app.method == "OPTIONS" {
+        app.no_content();
+        app.handled = true;
+    }
+}
 
 // One-line Bearer auth guard: runs `F(token)` on valid Bearer header, else
 // stages `401` and marks `app.handled = true` so downstream routes/405 skip it.

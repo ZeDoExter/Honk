@@ -547,6 +547,29 @@ inline fn cors_preflight(c: Ctx&) {
     c.resp_body = "";
     c.responded = true;
 }
+// Exact-match `Origin` against a comma-separated allowlist (OWS around
+// commas trimmed). Full-string equality only, never prefix/substring.
+// Returns the matched allowlist entry (byte-identical to `origin`).
+fn cors_match_origin(origin: const u8[:], allow: const u8[:]) -> const u8[:], bool {
+    if origin.len == 0 || allow.len == 0 { return "", false; }
+    var pos: i64 = 0;
+    while pos <= allow.len {
+        var end = allow.len;
+        var i = pos;
+        while i < allow.len {
+            if allow[i] == ',' { end = i; break; }
+            i++;
+        }
+        var s = pos;
+        while s < end && (allow[s] == ' ' || allow[s] == '\t') { s++; }
+        var e = end;
+        while e > s && (allow[e - 1] == ' ' || allow[e - 1] == '\t') { e--; }
+        if e > s && allow[s..e] == origin { return allow[s..e], true; }
+        if end == allow.len { break; }
+        pos = end + 1;
+    }
+    return "", false;
+}
 
 fn status_text(code: i64) -> const u8[:] {
     if code == 101 { return "Switching Protocols"; }
