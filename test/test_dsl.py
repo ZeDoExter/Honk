@@ -377,6 +377,24 @@ def test_websocket_and_openapi(port):
         fin, op, close_pl = read_ws_server_frame(f)
         assert fin and op == 8 and int.from_bytes(close_pl[:2], "big") == 1002
         f.close()
+    # 3. Invalid UTF-8 text frame -> Close 1007; valid multi-byte UTF-8 echoes fine
+    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+        s.sendall(
+            b"GET /v1/ws/lobby HTTP/1.1\r\nHost: localhost\r\n"
+            b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        f = s.makefile("rb")
+        assert f.readline().startswith(b"HTTP/1.1 101")
+        while f.readline() not in (b"\r\n", b"\n", b""):
+            pass
+        s.sendall(make_ws_client_frame(1, "héllo".encode()))
+        fin, op, msg_ok = read_ws_server_frame(f)
+        assert fin and op == 1 and pyjson.loads(msg_ok) == {"room": "lobby", "msg": "héllo"}
+        s.sendall(make_ws_client_frame(1, b"\xff\xfe"))
+        fin, op, close_utf = read_ws_server_frame(f)
+        assert fin and op == 8 and int.from_bytes(close_utf[:2], "big") == 1007
+        f.close()
     print("  [PASS] test_websocket_and_openapi")
 
 

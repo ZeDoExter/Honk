@@ -241,6 +241,39 @@ fn close(ws: Ws&, code: i64 = 1000) {
     }
     ws.closed = true;
 }
+// Strict UTF-8 validity for text messages (RFC 6455 §8.1): rejects
+// overlong encodings, surrogate halves, and codepoints above U+10FFFF.
+fn ws_utf8_valid(s: const u8[:]) -> bool {
+    var i: i64 = 0;
+    while i < s.len {
+        let b0 = s[i];
+        if b0 < 0x80 { i++; continue; }
+        var need: i64 = 0;
+        var lo: u8 = 0x80;
+        var hi: u8 = 0xbf;
+        if b0 >= 0xc2 && b0 <= 0xdf { need = 1; }
+        else if b0 >= 0xe0 && b0 <= 0xef {
+            need = 2;
+            if b0 == 0xe0 { lo = 0xa0; }
+            else if b0 == 0xed { hi = 0x9f; }
+        } else if b0 >= 0xf0 && b0 <= 0xf4 {
+            need = 3;
+            if b0 == 0xf0 { lo = 0x90; }
+            else if b0 == 0xf4 { hi = 0x8f; }
+        } else { return false; }
+        if i + need >= s.len { return false; }
+        let c1 = s[i + 1];
+        if c1 < lo || c1 > hi { return false; }
+        var j: i64 = 2;
+        while j <= need {
+            let c = s[i + j];
+            if c < 0x80 || c > 0xbf { return false; }
+            j++;
+        }
+        i += need + 1;
+    }
+    return true;
+}
 
 // Read the next complete WebSocket data message into `msg_buf` (resetting `msg_buf` first).
 // Automatically answers `Ping` with `Pong`, handles `Close`, and reassembles fragments (<= 1 MiB).
@@ -372,6 +405,10 @@ fn recv_into(ws: Ws&, msg_buf: u8[>..]&) -> const u8[:], i64, bool {
         }
 
         if fin {
+            if msg_opcode == 1 && !ws_utf8_valid(msg_buf[..]) {
+                ws.close(1007);
+                return "", 0, false;
+            }
             return msg_buf[..], msg_opcode, true;
         }
     }
