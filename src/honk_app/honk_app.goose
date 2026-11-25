@@ -800,3 +800,231 @@ inline fn require_bool<F>(app: Ctx&, key: const u8[:]) {
         F(v);
     }
 }
+
+// Required non-empty form field (`urlencoded` or `multipart`) -> `F(val)`, else `400`.
+inline fn require_form<F>(app: Ctx&, key: const u8[:]) {
+    let v, ok = app.form(key);
+    if !ok || v.len == 0 {
+        field_error(app, "invalid or missing field: ", key);
+    } else {
+        F(v);
+    }
+}
+
+// --- chunked HTTP/1.1 streaming (`app.stream`) & Server-Sent Events (`app.sse`) ---
+
+struct Stream {
+    fd: i32,
+    head_only: bool,
+    closed: bool,
+    buf: u8[>..]&,
+}
+
+struct Sse {
+    fd: i32,
+    head_only: bool,
+    closed: bool,
+    buf: u8[>..]&,
+}
+
+inline fn write_hex_len(out: u8[>..]&, n: i64) {
+    let hx = "0123456789abcdef";
+    var digits: u8[16] = [0; 16];
+    var d: i64 = 0;
+    var v = n;
+    while v > 0 && d < 16 {
+        digits[d] = hx[(v & 15) as! i64];
+        v = v >> 4;
+        d++;
+    }
+    if d == 0 {
+        out.push('0');
+        return;
+    }
+    var i = d;
+    while i > 0 {
+        i--;
+        out.push(digits[i]);
+    }
+}
+
+fn stream_begin(app: Ctx&, ctype: const u8[:]) -> bool {
+    app.ctype = ctype;
+    if app.status == 0 { app.status = 200; }
+    emit_server_timing(app);
+    if app.fd < 0 {
+        app.set_header("Transfer-Encoding", "chunked");
+        app.responded = true;
+        return true;
+    }
+    var hdr: u8[>..] = [];
+    hdr.append("HTTP/1.1 ");
+    format(hdr, app.status);
+    hdr.push(' ');
+    hdr.append(status_text(app.status));
+    hdr.append("\r\nContent-Type: ");
+    hdr.append(app.ctype);
+    hdr.append("\r\nDate: ");
+    hdr.append(app.date);
+    let n_ex = if app.n_extra <= 8 { app.n_extra } else { 8 };
+    for i in n_ex {
+        hdr.append("\r\n");
+        hdr.append(app.extras[i].name);
+        hdr.append(": ");
+        hdr.append(app.extras[i].val);
+    }
+    if !app.keep_alive {
+        hdr.append("\r\nConnection: close");
+    }
+    hdr.append("\r\nTransfer-Encoding: chunked\r\n\r\n");
+    app.responded = true;
+    app.sent = true;
+    return honk_send(app.fd, hdr) >= 0;
+}
+
+fn stream_finish(app: Ctx&, closed: bool, bstart: i64) {
+    if app.fd < 0 {
+        app.resp_body = app.res[bstart..];
+        return;
+    }
+    if !app.head_only && !closed {
+        honk_send(app.fd, "0\r\n\r\n");
+    }
+}
+
+// Flush one HTTP/1.1 chunk (`<hex>\r\n<data>\r\n`) immediately; resets stack top on return.
+fn write(s: Stream&, data: const u8[:]) {
+    if data.len == 0 || s.head_only || s.closed { return; }
+    if s.fd < 0 {
+        s.buf.append(data);
+        return;
+    }
+    var chunk: u8[>..] = [];
+    write_hex_len(chunk, data.len);
+    chunk.append("\r\n");
+    chunk.append(data);
+    chunk.append("\r\n");
+    if honk_send(s.fd, chunk) < 0 {
+        s.closed = true;
+    }
+}
+
+// Stream an HTTP/1.1 `Transfer-Encoding: chunked` response (`app.stream("text/plain") { s => ... }`).
+inline fn stream<F>(app: Ctx&, ctype: const u8[:]) {
+    let ok = stream_begin(app, ctype);
+    let bstart = app.res.len;
+    var s = Stream { fd: app.fd, head_only: app.head_only, closed: !ok, buf: app.res };
+    F(s);
+    stream_finish(app, s.closed, bstart);
+}
+
+inline fn stream<F>(app: Ctx&) {
+    app.stream("text/plain") { s => F(s); };
+}
+
+inline fn append_sse_clean_line(out: u8[>..]&, val: const u8[:]) {
+    for ch in val {
+        if ch != '\r' && ch != '\n' { out.push(ch); }
+    }
+}
+
+inline fn append_sse_data_lines(out: u8[>..]&, data: const u8[:]) {
+    var start: i64 = 0;
+    var i: i64 = 0;
+    while i <= data.len {
+        if i == data.len || data[i] == '\n' {
+            var end = i;
+            if end > start && data[end - 1] == '\r' { end--; }
+            out.append("data: ");
+            out.append(data[start..end]);
+            out.push('\n');
+            start = i + 1;
+        }
+        i++;
+    }
+    out.push('\n');
+}
+
+fn sse_flush_frame(ev: Sse&, payload: const u8[:]) {
+    if payload.len == 0 || ev.head_only || ev.closed { return; }
+    if ev.fd < 0 {
+        ev.buf.append(payload);
+        return;
+    }
+    var chunk: u8[>..] = [];
+    write_hex_len(chunk, payload.len);
+    chunk.append("\r\n");
+    chunk.append(payload);
+    chunk.append("\r\n");
+    if honk_send(ev.fd, chunk) < 0 {
+        ev.closed = true;
+    }
+}
+
+// Emit an unnamed SSE event (`data: <line>\n\n`; multi-line safe).
+fn send(ev: Sse&, data: const u8[:]) {
+    if ev.head_only || ev.closed { return; }
+    var frame: u8[>..] = [];
+    append_sse_data_lines(frame, data);
+    sse_flush_frame(ev, frame);
+}
+
+// Emit a named SSE event (`event: <name>\ndata: <line>\n\n`).
+fn event(ev: Sse&, name: const u8[:], data: const u8[:]) {
+    if ev.head_only || ev.closed { return; }
+    var frame: u8[>..] = [];
+    if name.len > 0 {
+        frame.append("event: ");
+        append_sse_clean_line(frame, name);
+        frame.push('\n');
+    }
+    append_sse_data_lines(frame, data);
+    sse_flush_frame(ev, frame);
+}
+
+// Emit an SSE event carrying `id:` (`Last-Event-ID` resumption) + optional `event:`.
+fn id_event(ev: Sse&, id: const u8[:], name: const u8[:], data: const u8[:]) {
+    if ev.head_only || ev.closed { return; }
+    var frame: u8[>..] = [];
+    frame.append("id: ");
+    append_sse_clean_line(frame, id);
+    frame.push('\n');
+    if name.len > 0 {
+        frame.append("event: ");
+        append_sse_clean_line(frame, name);
+        frame.push('\n');
+    }
+    append_sse_data_lines(frame, data);
+    sse_flush_frame(ev, frame);
+}
+
+// Emit an SSE heartbeat comment (`: <text>\n\n`).
+fn comment(ev: Sse&, text: const u8[:]) {
+    if ev.head_only || ev.closed { return; }
+    var frame: u8[>..] = [];
+    frame.append(": ");
+    append_sse_clean_line(frame, text);
+    frame.append("\n\n");
+    sse_flush_frame(ev, frame);
+}
+
+// Emit an SSE reconnection interval (`retry: <ms>\n\n`).
+fn retry(ev: Sse&, ms: i64) {
+    if ev.head_only || ev.closed { return; }
+    var frame: u8[>..] = [];
+    frame.append("retry: ");
+    format(frame, ms);
+    frame.append("\n\n");
+    sse_flush_frame(ev, frame);
+}
+
+// Stream `text/event-stream` (`Cache-Control: no-cache`, `X-Accel-Buffering: no`, chunked).
+inline fn sse<F>(app: Ctx&) {
+    app.set_header("Cache-Control", "no-cache");
+    app.set_header("X-Accel-Buffering", "no");
+    let ok = stream_begin(app, "text/event-stream");
+    let bstart = app.res.len;
+    var ev = Sse { fd: app.fd, head_only: app.head_only, closed: !ok, buf: app.res };
+    F(ev);
+    stream_finish(app, ev.closed, bstart);
+}

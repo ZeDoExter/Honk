@@ -158,31 +158,36 @@ fn header(c: Ctx&, name: const u8[:]) -> const u8[:], bool {
     return "", false;
 }
 
-// Raw query parameter lookup (?a=1&b=2). Zero-copy view; no percent-decoding.
-fn query(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
-    if c.query_str.len == 0 { return "", false; }
+// Raw key=val&key2=val2 lookup (shared by query strings and URL-encoded forms).
+fn kv_lookup(raw: const u8[:], key: const u8[:]) -> const u8[:], bool {
+    if raw.len == 0 { return "", false; }
     var pos: i64 = 0;
-    while pos <= c.query_str.len {
-        var end = c.query_str.len;
+    while pos <= raw.len {
+        var end = raw.len;
         var i = pos;
-        while i < c.query_str.len {
-            if c.query_str[i] == '&' { end = i; break; }
+        while i < raw.len {
+            if raw[i] == '&' { end = i; break; }
             i++;
         }
         var eq = end;
         var j = pos;
         while j < end {
-            if c.query_str[j] == '=' { eq = j; break; }
+            if raw[j] == '=' { eq = j; break; }
             j++;
         }
-        if eq > pos && c.query_str[pos..eq] == key {
+        if eq > pos && raw[pos..eq] == key {
             let vs = if eq < end { eq + 1 } else { end };
-            return c.query_str[vs..end], true;
+            return raw[vs..end], true;
         }
-        if end == c.query_str.len { break; }
+        if end == raw.len { break; }
         pos = end + 1;
     }
     return "", false;
+}
+
+// Raw query parameter lookup (?a=1&b=2). Zero-copy view; no percent-decoding.
+fn query(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
+    return kv_lookup(c.query_str, key);
 }
 
 // Route parameter by index; "" when out of range.
@@ -596,4 +601,325 @@ fn emit(c: Ctx&, out: u8[>..]&, date: const u8[:]) {
     if !no_body {
         out.append(c.resp_body);
     }
+}
+
+// --- URL-encoded form & RFC 7578 zero-copy multipart/form-data ---
+
+struct Part {
+    name: const u8[:],
+    filename: const u8[:],
+    ctype: const u8[:],
+    data: const u8[:],
+    has_file: bool,
+}
+
+inline fn eq_prefix_ci(s: const u8[:], want: const u8[:]) -> bool {
+    if s.len < want.len { return false; }
+    for i in want.len {
+        if !eq_ci(s[i], want[i]) { return false; }
+    }
+    return true;
+}
+
+// Extract boundary token from `Content-Type: multipart/form-data; boundary=...`.
+fn multipart_boundary(c: Ctx&) -> const u8[:], bool {
+    let ct, ok = c.header("Content-Type");
+    if !ok || !eq_prefix_ci(ct, "multipart/form-data") { return "", false; }
+    if ct.len > 19 && ct[19] != ';' && ct[19] != ' ' && ct[19] != '\t' {
+        return "", false;
+    }
+    var pos: i64 = 19;
+    while pos < ct.len {
+        while pos < ct.len && (ct[pos] == ';' || ct[pos] == ' ' || ct[pos] == '\t') { pos++; }
+        if eq_prefix_ci(ct[pos..], "boundary=") {
+            pos += 9;
+            if pos < ct.len && ct[pos] == '"' {
+                pos++;
+                var qend = pos;
+                while qend < ct.len && ct[qend] != '"' { qend++; }
+                if qend >= ct.len { return "", false; }
+                let bnd = ct[pos..qend];
+                return bnd, bnd.len >= 1 && bnd.len <= 70;
+            }
+            var end = pos;
+            while end < ct.len && ct[end] != ';' && ct[end] != ' ' && ct[end] != '\t' { end++; }
+            let bnd = ct[pos..end];
+            return bnd, bnd.len >= 1 && bnd.len <= 70;
+        }
+        while pos < ct.len && ct[pos] != ';' { pos++; }
+    }
+    return "", false;
+}
+
+inline fn match_boundary_at(b: const u8[:], pos: i64, bnd: const u8[:]) -> bool {
+    if pos + 2 + bnd.len > b.len { return false; }
+    return b[pos] == '-' && b[pos + 1] == '-' && b[pos + 2 .. pos + 2 + bnd.len] == bnd;
+}
+
+fn parse_part_headers(phdrs: const u8[:], empty_ref: const u8[:]) -> Part, bool {
+    let no_ct: const u8[:] = if false { empty_ref } else { "" };
+    let bad = Part { name: empty_ref, filename: empty_ref, ctype: no_ct, data: empty_ref, has_file: false };
+    var pname = empty_ref;
+    var pfile = empty_ref;
+    var pctype = empty_ref;
+    var has_file = false;
+    var has_disp = false;
+
+    var pos: i64 = 0;
+    while pos < phdrs.len {
+        var eol = phdrs.len;
+        var i = pos;
+        while i < phdrs.len {
+            if phdrs[i] == '\r' { eol = i; break; }
+            i++;
+        }
+        var colon = -1;
+        var j = pos;
+        while j < eol {
+            if phdrs[j] == ':' { colon = j; break; }
+            j++;
+        }
+        if colon > pos {
+            let hn = phdrs[pos..colon];
+            var vs = colon + 1;
+            while vs < eol && (phdrs[vs] == ' ' || phdrs[vs] == '\t') { vs++; }
+            var ve = eol;
+            while ve > vs && (phdrs[ve - 1] == ' ' || phdrs[ve - 1] == '\t') { ve--; }
+            let hv = phdrs[vs..ve];
+
+            if hn.len == 12 && eq_prefix_ci(hn, "content-type") {
+                if hv.len > 0 { pctype = hv; }
+            } else if hn.len == 19 && eq_prefix_ci(hn, "content-disposition") {
+                if !eq_prefix_ci(hv, "form-data") { return bad, false; }
+                has_disp = true;
+                var p: i64 = 9;
+                while p < hv.len {
+                    while p < hv.len && (hv[p] == ';' || hv[p] == ' ' || hv[p] == '\t') { p++; }
+                    var is_name = false;
+                    var is_fname = false;
+                    if eq_prefix_ci(hv[p..], "name=") {
+                        is_name = true;
+                        p += 5;
+                    } else if eq_prefix_ci(hv[p..], "filename=") {
+                        is_fname = true;
+                        p += 9;
+                    }
+                    if is_name || is_fname {
+                        var val = empty_ref;
+                        if p < hv.len && hv[p] == '"' {
+                            p++;
+                            let qs = p;
+                            while p < hv.len && hv[p] != '"' { p++; }
+                            if p >= hv.len { return bad, false; }
+                            val = hv[qs..p];
+                            p++;
+                        } else {
+                            let us = p;
+                            while p < hv.len && hv[p] != ';' && hv[p] != ' ' && hv[p] != '\t' { p++; }
+                            val = hv[us..p];
+                        }
+                        if is_name {
+                            pname = val;
+                        } else {
+                            has_file = true;
+                            // RFC 7578 §4.2: strip any client directory prefix (`/` or `\`).
+                            var base_idx: i64 = 0;
+                            for ch, idx in val {
+                                if ch == '/' || ch == '\\' { base_idx = idx + 1; }
+                            }
+                            pfile = val[base_idx..];
+                        }
+                    } else {
+                        while p < hv.len && hv[p] != ';' { p++; }
+                    }
+                }
+            }
+        }
+        pos = eol + 2;
+    }
+    if !has_disp || pname.len == 0 {
+        return bad, false;
+    }
+    let final_ct: const u8[:] = if pctype.len > 0 { pctype } else { "text/plain" };
+    return Part { name: pname, filename: pfile, ctype: final_ct, data: empty_ref, has_file: has_file }, true;
+}
+
+// Stream every part in a `multipart/form-data` body as zero-copy slices into `c.body`.
+// Returns `false` when `Content-Type` is not multipart or the framing is malformed.
+inline fn each_part<F>(c: Ctx&) -> bool {
+    let bnd, bok = c.multipart_boundary();
+    if !bok { return false; }
+    let b = c.body;
+    let empty_ref = b[..0];
+    var bpos: i64 = -1;
+    if match_boundary_at(b, 0, bnd) {
+        bpos = 0;
+    } else {
+        var s: i64 = 0;
+        while s + 4 + bnd.len <= b.len {
+            if b[s] == '\r' && b[s + 1] == '\n' && match_boundary_at(b, s + 2, bnd) {
+                bpos = s + 2;
+                break;
+            }
+            s++;
+        }
+    }
+    if bpos < 0 { return false; }
+
+    var after_b = bpos + 2 + bnd.len;
+    if after_b + 2 <= b.len && b[after_b] == '-' && b[after_b + 1] == '-' {
+        return true;
+    }
+    while after_b < b.len && (b[after_b] == ' ' || b[after_b] == '\t') { after_b++; }
+    if after_b + 2 > b.len || b[after_b] != '\r' || b[after_b + 1] != '\n' {
+        return false;
+    }
+    var part_start = after_b + 2;
+
+    while part_start <= b.len {
+        var phdrs = empty_ref;
+        var data_start = -1;
+        if part_start + 2 <= b.len && b[part_start] == '\r' && b[part_start + 1] == '\n' {
+            return false;
+        }
+        var h = part_start;
+        while h + 3 < b.len {
+            if b[h] == '\r' && b[h + 1] == '\n' && b[h + 2] == '\r' && b[h + 3] == '\n' {
+                phdrs = b[part_start .. h + 2];
+                data_start = h + 4;
+                break;
+            }
+            h++;
+        }
+        if data_start < 0 { return false; }
+
+        var delim_pos = -1;
+        var next_part = -1;
+        var is_final = false;
+        var scan = data_start;
+        while scan + 4 + bnd.len <= b.len {
+            if b[scan] == '\r' && b[scan + 1] == '\n' && match_boundary_at(b, scan + 2, bnd) {
+                var tail = scan + 4 + bnd.len;
+                if tail + 2 <= b.len && b[tail] == '-' && b[tail + 1] == '-' {
+                    delim_pos = scan;
+                    is_final = true;
+                    break;
+                }
+                while tail < b.len && (b[tail] == ' ' || b[tail] == '\t') { tail++; }
+                if tail + 2 <= b.len && b[tail] == '\r' && b[tail + 1] == '\n' {
+                    delim_pos = scan;
+                    next_part = tail + 2;
+                    break;
+                }
+            }
+            scan++;
+        }
+        if delim_pos < 0 { return false; }
+
+        let meta, mok = parse_part_headers(phdrs, empty_ref);
+        if !mok { return false; }
+        let part = Part {
+            name: meta.name,
+            filename: meta.filename,
+            ctype: meta.ctype,
+            data: b[data_start..delim_pos],
+            has_file: meta.has_file,
+        };
+        F(part);
+
+        if is_final { return true; }
+        part_start = next_part;
+    }
+    return false;
+}
+
+// Look up a part (field or file) by `field_name` in a `multipart/form-data` request.
+fn multipart_part(c: Ctx&, field_name: const u8[:]) -> Part, bool {
+    let empty_ref = c.body[..0];
+    let no_ct: const u8[:] = if false { empty_ref } else { "" };
+    var out = Part { name: empty_ref, filename: empty_ref, ctype: no_ct, data: empty_ref, has_file: false };
+    var found = false;
+    let valid = c.each_part() { p =>
+        if !found && p.name == field_name {
+            out = p;
+            found = true;
+        }
+    };
+    if !valid || !found {
+        return Part { name: empty_ref, filename: empty_ref, ctype: no_ct, data: empty_ref, has_file: false }, false;
+    }
+    return out, true;
+}
+
+// Look up an uploaded file part (`filename` non-empty) by `field_name`.
+fn multipart_file(c: Ctx&, field_name: const u8[:]) -> Part, bool {
+    let empty_ref = c.body[..0];
+    let no_ct: const u8[:] = if false { empty_ref } else { "" };
+    var out = Part { name: empty_ref, filename: empty_ref, ctype: no_ct, data: empty_ref, has_file: false };
+    var found = false;
+    let valid = c.each_part() { p =>
+        if !found && p.name == field_name && p.has_file && p.filename.len > 0 {
+            out = p;
+            found = true;
+        }
+    };
+    if !valid || !found {
+        return Part { name: empty_ref, filename: empty_ref, ctype: no_ct, data: empty_ref, has_file: false }, false;
+    }
+    return out, true;
+}
+
+// Form field lookup: decodes `application/x-www-form-urlencoded` (`+` -> space, `%XX`)
+// and transparently reads non-file text fields from `multipart/form-data` requests.
+fn form(c: Ctx&, key: const u8[:]) -> const u8[:], bool {
+    let ct, ct_ok = c.header("Content-Type");
+    if ct_ok && eq_prefix_ci(ct, "multipart/form-data") {
+        let p, pok = c.multipart_part(key);
+        if pok && !p.has_file { return p.data, true; }
+        return "", false;
+    }
+    let raw_v, ok = kv_lookup(c.body, key);
+    if ok {
+        return url_decode(c, raw_v, true);
+    }
+    // Slow path for percent/plus-encoded field names (e.g. `first+name=Ada`).
+    var pos: i64 = 0;
+    while pos < c.body.len {
+        var end = c.body.len;
+        var i = pos;
+        while i < c.body.len {
+            if c.body[i] == '&' { end = i; break; }
+            i++;
+        }
+        var eq = end;
+        var has_enc = false;
+        var j = pos;
+        while j < end {
+            if c.body[j] == '=' { eq = j; break; }
+            if c.body[j] == '%' || c.body[j] == '+' { has_enc = true; }
+            j++;
+        }
+        if has_enc && eq > pos {
+            let dk, dok = url_decode(c, c.body[pos..eq], true);
+            if dok && dk == key {
+                let vs = if eq < end { eq + 1 } else { end };
+                return url_decode(c, c.body[vs..end], true);
+            }
+        }
+        if end == c.body.len { break; }
+        pos = end + 1;
+    }
+    return "", false;
+}
+
+inline fn form_or(c: Ctx&, key: const u8[:], default_val: const u8[:]) -> const u8[:] {
+    let v, ok = c.form(key);
+    if ok { return v; }
+    return default_val;
+}
+
+inline fn form_int(c: Ctx&, key: const u8[:]) -> i64, bool {
+    let v, ok = c.form(key);
+    if !ok { return 0, false; }
+    return parse_i64_strict(v);
 }

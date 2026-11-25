@@ -120,7 +120,7 @@ inline fn req<F>(t: Tester&, method: const u8[:], target: const u8[:],
     for i in cl { t.ctype_buf[i] = ctx.ctype[i]; }
     t.ctype_len = cl;
 
-    let no_body = ctx.head_only || ctx.status == 204;
+    let no_body = ctx.head_only || ctx.status == 204 || ctx.status == 304;
     let src_body = if no_body { ctx.resp_body[..0] } else { ctx.resp_body };
     let bl = if src_body.len <= 16384 { src_body.len } else { 16384 };
     for i in bl { t.buf[i] = src_body[i]; }
@@ -168,4 +168,8 @@ inline fn put_json<F>(t: Tester&, target: const u8[:], json_body: const u8[:]) {
 
 inline fn patch_json<F>(t: Tester&, target: const u8[:], json_body: const u8[:]) {
     t.req("PATCH", target, "Content-Type: application/json\r\n", json_body) { app => F(app); };
+}
+
+inline fn post_form<F>(t: Tester&, target: const u8[:], form_body: const u8[:]) {
+    t.req("POST", target, "Content-Type: application/x-www-form-urlencoded\r\n", form_body) { app => F(app); };
 }

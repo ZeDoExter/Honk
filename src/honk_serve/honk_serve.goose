@@ -146,12 +146,14 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
                                res_buf, tmp_buf, dom_buf, dstr_buf);
             request_run(ctx, tx_buf, date) { c => F(c); };
             if ctx.sent {
-                // Static: headers now (queued behind any pending bytes),
-                // then file bytes via sendfile (EAGAIN tails resume on
-                // EPOLLOUT). sendfile_data closes file_fd exactly once on
-                // every path, including dead connections.
-                honk_send(fd, ctx.resp_hdrs);
-                honk_sendfile_data(fd, ctx.resp_file_fd, ctx.resp_file_n);
+                // Static sendfile responses stage resp_hdrs / resp_file_fd;
+                // chunked stream / SSE handlers flush directly during F(c).
+                if ctx.resp_hdrs.len > 0 {
+                    honk_send(fd, ctx.resp_hdrs);
+                }
+                if ctx.resp_file_fd >= 0 {
+                    honk_sendfile_data(fd, ctx.resp_file_fd, ctx.resp_file_n);
+                }
             } else if tx_buf.len > 0 {
                 honk_send(fd, tx_buf);
             }

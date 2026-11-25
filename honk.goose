@@ -1,7 +1,7 @@
 // honk.goose -- Honk package entry at repository root.
 //
 // Apps import Honk with a single line (no main.build sidecar needed):
-//   import honk from "ZeDoExter/Honk@v0.5.0";   // pinned from GitHub
+//   import honk from "ZeDoExter/Honk@v0.6.0";   // pinned from GitHub
 //   import honk from "../Honk";                 // relative local checkout
 //
 // Opt-in SQLite lives in the sibling `sqlite/` package so non-DB binaries
