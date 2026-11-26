@@ -3,7 +3,7 @@
 Honk is an HTTP/1.1 backend framework written in [Goose](https://github.com/aardappel/goose)
 (ahead-of-time compiled to C) for Linux `epoll` servers: a **4-line single-file Hello World**,
 **~2 MB flat RSS**, a **~150 KiB zero-dependency binary**, and zero per-request
-heap allocations — at `89%` of hand-written C speed.
+heap allocations — at `95%` of hand-written C speed.
 
 ```sh
 git clone https://github.com/ZeDoExter/Honk.git && cd Honk
@@ -106,39 +106,41 @@ Caddy); Honk speaks plain HTTP/1.1 with keep-alive + pipelining.
 10-framework shootout, single core pinned (`taskset -c 0`, 1 worker each),
 `wrk -t2 -c64 -d5s` on sibling cores, 5 interleaved rounds, medians.
 **WSL2 indicative** — ratios are the robust readout; re-run on bare metal with
-`python3 bench/run_bench_compete.py`. Full methodology + versions + round data:
-[`docs/history/phase3-report.md`](docs/history/phase3-report.md).
+`python3 bench/run_bench_compete.py`. Full methodology + versions:
+[`docs/history/phase3-report.md`](docs/history/phase3-report.md); round data:
+`bench/bench_compete_results.json` (re-measured on current `master`, control
+rebuilt `gcc -O2` + `picohttpparser.c`).
 
 **Throughput, `req/s` (median of 5)**
 
 | Framework | W1 Plaintext | W2 JSON | W3 Route+MW | W4 Validate |
 |---|---:|---:|---:|---:|
-| Bare C (epoll) | `93,443` | — | — | — |
-| **Honk** | **`83,513`** | **`73,477`** | **`73,075`** | **`70,290`** |
-| Rust Axum | `29,052` | `24,444` | `20,490` | `20,969` |
-| Go net/http | `17,668` | `14,966` | `14,795` | `12,154` |
-| Bun.serve | `36,995` | `30,102` | `24,415` | `17,699` |
-| Elysia (Bun) | `44,689` | `35,133` | `23,824` | `10,721` |
-| Hono (Bun) | `36,611` | `24,724` | `15,121` | `14,901` |
-| Fastify (Node) | `10,601` | `8,746` | `8,940` | `7,199` |
-| Express (Node) | `3,766` | `2,757` | `2,645` | `1,814` |
-| FastAPI (uvicorn) | `4,566` | `2,837` | `1,771` | `2,580` |
+| Bare C (epoll) | `124,004` | — | — | — |
+| **Honk** | **`117,950`** | **`120,951`** | **`108,357`** | **`109,596`** |
+| Rust Axum | `54,253` | `49,249` | `35,885` | `36,179` |
+| Go net/http | `27,044` | `24,150` | `22,514` | `19,664` |
+| Bun.serve | `63,682` | `63,059` | `35,086` | `30,240` |
+| Elysia (Bun) | `74,667` | `66,435` | `32,895` | `17,303` |
+| Hono (Bun) | `63,583` | `49,275` | `23,801` | `24,659` |
+| Fastify (Node) | `15,299` | `14,285` | `14,092` | `12,414` |
+| Express (Node) | `5,407` | `5,679` | `5,056` | `3,967` |
+| FastAPI (uvicorn) | `6,932` | `6,329` | `3,146` | `4,555` |
 
-Honk is `89%` of hand-written C on plaintext and **2.1–3.4× the nearest rival** on
-every dynamic workload. User-space cost stays at `0.86–1.57 µs/req` (rivals:
-`7.6–468 µs/req`).
+Honk is `95%` of hand-written C on plaintext and **1.8–3.0× the nearest rival**
+on every dynamic workload (`3.0×` on route+middleware and validation).
+User-space cost stays at `0.67–0.98 µs/req` (rivals: `4.1–248 µs/req`).
 
 **Memory (`VmRSS`, idle → 512 conns + load) · Cold start · Artifact**
 
 | Framework | Idle | 512 conns | Cold start | Artifact |
 |---|---:|---:|---:|---:|
-| Bare C | `1,408 kB` | `1,536 kB` | `106 ms` | `0.03 MiB` |
-| **Honk** | **`2,048 kB`** | **`2,048 kB`** | **`101 ms`** | **`0.17 MiB`** |
+| Bare C | `1,408 kB` | `1,536 kB` | `103 ms` | `0.03 MiB` |
+| **Honk** | **`2,176 kB`** | **`2,304 kB`** | **`101 ms`** | **`0.20 MiB`** |
 | Axum | `2,688 kB` | `13,824 kB` | `103 ms` | `1.88 MiB` |
-| Go | `6,016 kB` | `23,168 kB` | `106 ms` | `7.07 MiB` |
-| Bun / Elysia / Hono | `27–45 MB` | `40–53 MB` | `205–915 ms` | `102 MB` runtime + `1–4 MB` modules |
-| Fastify / Express | `57–67 MB` | `80–114 MB` | `2.1–4.9 s`* | `2–8 MB` modules |
-| FastAPI | `49 MB` | `55 MB` | `3.8 s`* | `52 MB` venv |
+| Go | `6,016 kB` | `22,496 kB` | `112 ms` | `7.06 MiB` |
+| Bun / Elysia / Hono | `26–44 MB` | `36–51 MB` | `213 ms–1.9 s` | `102 MB` runtime + `1–4 MB` modules |
+| Fastify / Express | `56–65 MB` | `78–102 MB` | `4.6–7.5 s`* | `2–8 MB` modules |
+| FastAPI | `48 MB` | `54 MB` | `4.6 s`* | `52 MB` venv |
 
 \* Node/Python cold starts pay WSL2 9P filesystem import cost on this box (disclosed,
 not normalized); steady-state numbers are unaffected.

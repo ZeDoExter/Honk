@@ -144,9 +144,9 @@ def preflight_contender(cont, port):
     """Verify exact workload behavior; returns (cold_start_s, curl_w1_bytes)."""
     proc, log = spawn_contender(cont, port)
     try:
-        t0 = time.time()
+        t0 = time.monotonic()
         wait_ready(port)
-        cold_start = time.time() - t0
+        cold_start = time.monotonic() - t0
         wl = cont["workloads"]
         # W1.
         code, hdrs, body = http_roundtrip(
