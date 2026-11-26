@@ -18,7 +18,7 @@ jobs:
             gcc g++ cmake make git python3 libsqlite3-dev
 
       - name: Toolchain setup (pinned Goose)
-        run: ./honk setup
+        run: python3 honk.py setup
 
       - name: Full test suite (Release + ASan/UBSan/LSan)
-        run: ./honk test
+        run: python3 honk.py test
