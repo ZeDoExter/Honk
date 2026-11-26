@@ -337,16 +337,16 @@ def test_websocket_and_openapi(port):
     code_d, hdrs_d, body_d = req(port, "GET", "/v1/docs")
     assert code_d == 200 and hdrs_d[b"content-type"] == b"text/html" and b"@scalar/api-reference" in body_d
 
-    # 2. Live TCP RFC 6455 WebSocket upgrade + Ping/Pong + fragmented text + 16-bit extended len + Close
-    with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
+    # 2. Non-blocking multiplex: idle A + active B + HTTP share ONE worker.
+    def ws_handshake(room):
+        s = socket.create_connection(("127.0.0.1", port), timeout=5.0)
         s.sendall(
-            b"GET /v1/ws/lobby HTTP/1.1\r\nHost: localhost\r\n"
+            b"GET /v1/ws/" + room + b" HTTP/1.1\r\nHost: localhost\r\n"
             b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
             b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         )
         f = s.makefile("rb")
-        status = f.readline()
-        assert status.startswith(b"HTTP/1.1 101 Switching Protocols"), status
+        assert f.readline().startswith(b"HTTP/1.1 101"), room
         resp_h = {}
         while True:
             ln = f.readline()
@@ -355,28 +355,58 @@ def test_websocket_and_openapi(port):
             k, v = ln.split(b":", 1)
             resp_h[k.strip().lower()] = v.strip()
         assert resp_h[b"sec-websocket-accept"] == b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        return s, f
 
-        # Ping -> automatic Pong
-        s.sendall(make_ws_client_frame(9, b"hb"))
-        fin, op, p_data = read_ws_server_frame(f)
-        assert (fin, op, p_data) == (True, 10, b"hb")
+    sa, fa = ws_handshake(b"lobby")
+    try:
+        sb, fb = ws_handshake(b"arena")
+        try:
+            # B: Ping/Pong, echo (own room!), fragmented, extended len ...
+            sb.sendall(make_ws_client_frame(9, b"hb"))
+            assert read_ws_server_frame(fb) == (True, 10, b"hb")
+            sb.sendall(make_ws_client_frame(1, b"hello ", fin=False)
+                       + make_ws_client_frame(0, b"ws!", fin=True))
+            fin, op, msg1 = read_ws_server_frame(fb)
+            assert fin and op == 1 and pyjson.loads(msg1) == {"room": "arena", "msg": "hello ws!"}
+            big_txt = "X" * 200
+            sb.sendall(make_ws_client_frame(1, big_txt.encode()))
+            fin, op, msg2 = read_ws_server_frame(fb)
+            assert fin and op == 1 and pyjson.loads(msg2) == {"room": "arena", "msg": big_txt}
+            # ... while HTTP flows on the same worker and A idles.
+            code_w, _, body_w = req(port, "GET", "/wid")
+            assert code_w == 200 and b"worker" in body_w
+            code_t, _, body_t = req(port, "GET", "/txt")
+            assert code_t == 200 and body_t == b"plain literal"
+            # A wakes up: own room preserved across turns.
+            sa.sendall(make_ws_client_frame(1, b"late"))
+            fin, op, msg3 = read_ws_server_frame(fa)
+            assert fin and op == 1 and pyjson.loads(msg3) == {"room": "lobby", "msg": "late"}
+            # Clean close handshake on B; A stays usable.
+            sb.sendall(make_ws_client_frame(8, (1000).to_bytes(2, "big")))
+            fin, op, close_pl = read_ws_server_frame(fb)
+            assert fin and op == 8 and int.from_bytes(close_pl[:2], "big") in (1000, 1005)
+            fb.close()
+            sb.close()
+            sa.sendall(make_ws_client_frame(1, b"still-here"))
+            fin, op, msg4 = read_ws_server_frame(fa)
+            assert fin and op == 1 and pyjson.loads(msg4) == {"room": "lobby", "msg": "still-here"}
+        finally:
+            try:
+                fb.close()
+            except Exception:
+                pass
+            sb.close()
+    finally:
+        fa.close()
+        sa.close()
 
-        # Fragmented text message (FIN=0 opcode=1 + FIN=1 opcode=0)
-        s.sendall(make_ws_client_frame(1, b"hello ", fin=False) + make_ws_client_frame(0, b"ws!", fin=True))
-        fin, op, msg1 = read_ws_server_frame(f)
-        assert fin and op == 1 and pyjson.loads(msg1) == {"room": "lobby", "msg": "hello ws!"}
-
-        # 200-byte 16-bit extended-length message
-        big_txt = "X" * 200
-        s.sendall(make_ws_client_frame(1, big_txt.encode()))
-        fin, op, msg2 = read_ws_server_frame(f)
-        assert fin and op == 1 and pyjson.loads(msg2) == {"room": "lobby", "msg": big_txt}
-
-        # Unmasked client frame -> RFC 6455 §5.1 protocol error Close 1002
-        s.sendall(make_ws_client_frame(1, b"unmasked", masked=False))
-        fin, op, close_pl = read_ws_server_frame(f)
-        assert fin and op == 8 and int.from_bytes(close_pl[:2], "big") == 1002
-        f.close()
+    # Unmasked client frame -> RFC 6455 §5.1 protocol error Close 1002
+    su, fu = ws_handshake(b"lobby")
+    su.sendall(make_ws_client_frame(1, b"unmasked", masked=False))
+    fin, op, close_u = read_ws_server_frame(fu)
+    assert fin and op == 8 and int.from_bytes(close_u[:2], "big") == 1002
+    fu.close()
+    su.close()
     # 3. Invalid UTF-8 text frame -> Close 1007; valid multi-byte UTF-8 echoes fine
     with socket.create_connection(("127.0.0.1", port), timeout=5.0) as s:
         s.sendall(
