@@ -47,6 +47,9 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+/* Forward declarations: these are called before their definitions below;
+ * GCC 14+ turns implicit declarations into hard errors. */
+int32_t honk_should_stop(void);
 #define HONK_MAX_EVENTS       256
 #define HONK_MAX_CONNS        4096
 #define HONK_MAX_FD           16384
