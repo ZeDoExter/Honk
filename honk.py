@@ -29,6 +29,44 @@ def run(cmd, cwd=None, capture=False, env=None):
                           text=True, env=env or os.environ)
 
 
+def toolchain_fingerprint():
+    """Canonical toolchain record: goose version/HEAD, cc, honk HEAD."""
+    gb = goose_bin()
+    goose_ver, goose_head = "", ""
+    if gb:
+        r = run([gb, "--version"], capture=True)
+        goose_ver = r.stdout.strip() or r.stderr.strip()
+        goose_head = git_head(os.path.join(HONK_ROOT, "goose_repo"))
+    cc = shutil.which("gcc") or shutil.which("cc") or ""
+    gcc_ver = ""
+    if cc:
+        r = run([cc, "--version"], capture=True)
+        gcc_ver = (r.stdout.strip().splitlines() or [""])[0]
+    return {
+        "goose": goose_ver,
+        "goose_head": goose_head,
+        "goose_pinned": PINNED_GOOSE,
+        "cc": gcc_ver,
+        "honk_head": git_head(HONK_ROOT),
+    }
+
+
+def write_build_info(out_bin, asan):
+    """Stamp a `<binary>.build-info` audit sidecar next to build output."""
+    try:
+        fp = toolchain_fingerprint()
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(out_bin + ".build-info", "w") as f:
+            f.write(f"honk: {fp['honk_head']}\n")
+            f.write(f"goose: {fp['goose']}\n")
+            f.write(f"goose-head: {fp['goose_head']}\n")
+            f.write(f"cc: {fp['cc']}\n")
+            f.write(f"asan: {asan}\n")
+            f.write(f"built-at: {ts}\n")
+    except OSError:
+        pass
+
+
 def cmd_doctor(_args):
     print(f"Honk root: {HONK_ROOT}")
     ok = True
@@ -46,6 +84,15 @@ def cmd_doctor(_args):
     if gb:
         r = run([gb, "--version"], capture=True)
         print(f"        {r.stdout.strip() or r.stderr.strip()}")
+        fp = toolchain_fingerprint()
+        pinned = bool(fp["goose_head"]) and fp["goose_head"] == PINNED_GOOSE
+        check(f"goose pinned ({PINNED_GOOSE[:9]})", pinned,
+              f"got {(fp['goose_head'] or 'unknown')[:9]} — run ./honk setup")
+        gclean = git_clean(os.path.join(HONK_ROOT, "goose_repo"))
+        print(f"  [{'OK' if gclean else 'WARN'}] goose checkout clean"
+              + ("" if gclean else " — local mods make builds unreproducible"))
+        print(f"        cc: {fp['cc'] or 'unknown'}")
+        print(f"        honk: {(fp['honk_head'] or 'unknown')[:9]}")
     wrk = shutil.which("wrk") or os.path.expanduser("~/.local/bin/wrk")
     has_wrk = os.path.isfile(wrk) if wrk else False
     print(f"  [{'OK' if has_wrk else 'opt.'}] wrk load generator"
@@ -69,6 +116,16 @@ def git_head(repo):
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def git_clean(repo):
+    try:
+        r = subprocess.run(["git", "-C", repo, "status", "--porcelain",
+                            "--untracked-files=no"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == ""
 
 
 def cmd_setup(_args):
@@ -240,6 +297,8 @@ def build_app(goose_file, out_bin, asan=False):
     if not asan:
         r = run([gb, "build", goose_file, "-o", out_bin], capture=True, env=env)
         ok = r.returncode == 0
+        if ok:
+            write_build_info(out_bin, asan=False)
         return ok, (r.stdout + r.stderr)[-3000:]
     stem = os.path.splitext(out_bin)[0]
     standalone = stem + ".standalone.c"
@@ -261,7 +320,10 @@ def build_app(goose_file, out_bin, asan=False):
         os.remove(standalone)
     except OSError:
         pass
-    return r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    ok = r.returncode == 0
+    if ok:
+        write_build_info(out_bin, asan=True)
+    return ok, (r.stdout + r.stderr)[-3000:]
 
 
 def cmd_build(args):

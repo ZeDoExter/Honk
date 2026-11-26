@@ -5,10 +5,10 @@ __pycache__/
 *.obj
 *.o
 *.pdb
-*.ilk
-*.so
 *.dll
 *.dylib
+*.build-info
+dist/
 src/server_minimal
 src/server_minimal_asan
 src/server
