@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Honk Chat</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2em auto; padding: 0 1em; }
+  #log { border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: .5em; margin: .5em 0; }
+  #log div { margin: .15em 0; }
+  .row { display: flex; gap: .5em; margin: .5em 0; }
+  input[type=text] { flex: 1; }
+</style>
+</head>
+<body>
+<h1>Honk Chat</h1>
+<div class="row" id="loginRow">
+  <input type="text" id="user" placeholder="username (1-32 chars)">
+  <input type="text" id="room" placeholder="room" value="lobby">
+  <button id="join">Join</button>
+</div>
+<div id="log"></div>
+<div class="row">
+  <input type="text" id="msg" placeholder="message (Enter to send)" disabled>
+  <button id="send" disabled>Send</button>
+</div>
+<script>
+let ws = null;
+const log = document.getElementById("log");
+function line(who, text) {
+  const d = document.createElement("div");
+  d.textContent = who + ": " + text;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+document.getElementById("join").onclick = async () => {
+  const user = document.getElementById("user").value.trim();
+  const room = document.getElementById("room").value.trim() || "lobby";
+  if (!user) { alert("username required"); return; }
+  const lr = await fetch("/login", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user }) });
+  if (!lr.ok) { alert("login failed: " + lr.status); return; }
+  const { token } = await lr.json();
+  const hr = await fetch("/history/" + encodeURIComponent(room));
+  if (hr.ok) {
+    for (const m of (await hr.json()).reverse()) line(m.user, m.text);
+  }
+  ws = new WebSocket(`ws://${location.host}/ws/${encodeURIComponent(room)}?token=${encodeURIComponent(token)}`);
+  ws.onmessage = (ev) => {
+    try {
+      const m = JSON.parse(ev.data);
+      line(m.user, m.text);
+    } catch { line("*", ev.data); }
+  };
+  ws.onopen = () => {
+    document.getElementById("msg").disabled = false;
+    document.getElementById("send").disabled = false;
+    document.getElementById("join").disabled = true;
+    line("*", "joined #" + room + " as " + user);
+  };
+  ws.onclose = () => line("*", "disconnected");
+};
+function send() {
+  const box = document.getElementById("msg");
+  const text = box.value;
+  if (!text || !ws || ws.readyState !== 1) return;
+  ws.send(text);
+  box.value = "";
+}
+document.getElementById("send").onclick = send;
+document.getElementById("msg").onkeydown = (e) => { if (e.key === "Enter") send(); };
+</script>
+</body>
+</html>

@@ -9,6 +9,8 @@ __pycache__/
 *.dylib
 *.build-info
 dist/
+examples/chat/app
+examples/chat/chat.db*
 src/server_minimal
 src/server_minimal_asan
 src/server
