@@ -43,6 +43,7 @@ extern fn honk_buf_reset(buf: u8[>..]&);
 extern fn honk_ws_upgrade(fd: i32, slot: i32);
 extern fn honk_conn_ws_slot(fd: i32) -> i32;
 extern fn honk_ws_poll(fd: i32, rx_buf: u8[>..]&) -> i32;
+extern fn honk_ws_finish(fd: i32, rx_buf: u8[>..]&, consumed: i32);
 extern fn honk_ws_msg_append(fd: i32, bytes: const u8[:]) -> i32;
 extern fn honk_ws_msg_take(fd: i32, out: u8[>..]&) -> i64;
 extern fn honk_ws_aux_set(fd: i32, blob: const u8[:]) -> i32;

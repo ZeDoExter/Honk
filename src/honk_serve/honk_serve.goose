@@ -76,34 +76,31 @@ inline fn serve<F>() {
 
 // --- non-blocking WebSocket turns (one worker multiplexes HTTP + WS) ---
 //
-// Upgraded connections leave HTTP: each EPOLLIN turn drains socket bytes,
-// runs complete frames, and stashes the tail. State splits two ways:
-// Goose-global slim slots (fixed, per-worker copies, zero idle cost beyond
-// touched pages) plus C lazy message/aux buffers (NULL when idle, freed on
-// close). The C-side slot index is the source of truth: stale Goose slots
-// (fd reuse after untracked close) revalidate against it. Pool: 1024
-// upgraded conns per worker; handshake fails 503 past it.
+// Upgraded connections leave HTTP: each EPOLLIN turn drains socket bytes
+// (plus any stashed partial frame via partial_rx), runs complete frames,
+// and re-stashes the tail. State splits two ways: tiny Goose-global slots
+// (~48B × 1024, per-worker copies) plus C lazy partial/message/aux buffers
+// (NULL when idle, freed on close). The C-side slot index is the source of
+// truth: stale Goose slots (fd reuse after untracked close) revalidate
+// against it. Pool: 1024 upgraded conns per worker; handshake fails 503 past it.
 
 struct WsSlot {
     used: bool,
     fd: i32,
     opcode: i64,
     frag: bool,
-    stash: u8[2048],
-    stash_len: i64,
     aux_path_len: i64,
     aux_user_len: i64,
     authed: bool,
 }
 
-var ws_slots: WsSlot[1024] = [WsSlot { used: false, fd: -1, opcode: 0, frag: false, stash_len: 0, aux_path_len: 0, aux_user_len: 0, authed: false, .. }; 1024];
+var ws_slots: WsSlot[1024] = [WsSlot { used: false, fd: -1, opcode: 0, frag: false, aux_path_len: 0, aux_user_len: 0, authed: false }; 1024];
 
 inline fn ws_slot_init(si: i64, fd: i32) {
     ws_slots[si].used = true;
     ws_slots[si].fd = fd;
     ws_slots[si].opcode = 0;
     ws_slots[si].frag = false;
-    ws_slots[si].stash_len = 0;
     ws_slots[si].aux_path_len = 0;
     ws_slots[si].aux_user_len = 0;
     ws_slots[si].authed = false;
@@ -189,23 +186,6 @@ fn ws_close_fd(fd: i32, si: i64, code: i64) {
     honk_close(fd);
 }
 
-// Adopt pipelined bytes past a handshake as the slot's first WS input.
-fn ws_adopt_tail(fd: i32, rx: const u8[:], start: i64) {
-    let si = honk_conn_ws_slot(fd);
-    if si < 0 || si >= 1024 { return; }
-    if !ws_slots[si].used || ws_slots[si].fd != fd { return; }
-    let tail = rx.len - start;
-    if tail <= 0 { return; }
-    if tail > 2048 {
-        ws_close_fd(fd, si, 1009);
-        return;
-    }
-    for k in tail {
-        ws_slots[si].stash[k] = rx[start + k];
-    }
-    ws_slots[si].stash_len = tail;
-}
-
 inline fn ws_run<F>(ctx: Ctx&) {
     F(ctx);
 }
@@ -221,13 +201,7 @@ inline fn ws_turn<F>(fd: i32, si: i64, date: const u8[:]) {
         return;
     }
     if n == 0 { return; }
-    var input: u8[>..] = [];
-    for k in ws_slots[si].stash_len {
-        input.push(ws_slots[si].stash[k]);
-    }
-    input.append(rx[..]);
-    ws_slots[si].stash_len = 0;
-
+    let input = rx[..];
     var cur: i64 = 0;
     while cur + 2 <= input.len {
         let b0 = input[cur];
@@ -339,18 +313,7 @@ inline fn ws_turn<F>(fd: i32, si: i64, date: const u8[:]) {
             }
         }
     }
-    let tail = input.len - cur;
-    if tail > 0 {
-        if tail > 2048 {
-            ws_slot_free(si);
-            ws_close_fd(fd, si, 1009);
-            return;
-        }
-        for k in tail {
-            ws_slots[si].stash[k] = input[cur + k];
-        }
-        ws_slots[si].stash_len = tail;
-    }
+    honk_ws_finish(fd, rx, cur as! i32);
 }
 
 // Build a WSMSG ctx (handshake path/user restored from aux) and run F.
@@ -463,8 +426,8 @@ inline fn request<F>(fd: i32, date: const u8[:]) {
                                res_buf, tmp_buf, dom_buf, dstr_buf);
             request_run(ctx, tx_buf, date) { c => F(c); };
             if ctx.ws_upgraded_now {
-                // Handshake claimed this turn: adopt pipelined tail as WS bytes.
-                ws_adopt_tail(fd, rx_buf[..], (cursor + req.consumed) as! i64);
+                // Handshake claimed this turn: stash pipelined tail as WS bytes.
+                honk_ws_finish(fd, rx_buf, cursor + req.consumed);
                 cursor = rx_buf.len as! i32;
                 break;
             }
