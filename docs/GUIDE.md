@@ -374,8 +374,21 @@ fn main() {
 
 SQLite rules:
 - Run schema DDL once in `main` before forking or spawning workers.
-- **Multi-worker SQLite (`HONK_WORKERS`)**: close your setup DDL handle first, call `honk::workers_env()` (or `honk::workers(n)`), then open each worker's own WAL handle via `db_connect("todos.db")`.
-- Multi-worker WAL requires a POSIX filesystem (e.g. `/tmp` or native Linux ext4) for the `-shm` file.
+- **No SQL injection by construction — if you follow one rule**: SQL text must
+  be 100% developer constants; user bytes enter ONLY through `?N` bindings
+  (`bind_*`, `insert_text`, `run_int`, `sql_json_one*`). NEVER `append`/`format`
+  raw input into SQL — not even inside `LIKE` (bind the pattern instead).
+- **Identifiers need allowlists** (columns/tables/directions can't be bound):
+  ```goose
+  let col = if by == "name" { "name" } else if by == "age" { "age" } else { "id" };
+  let dir = order_dir(dir_param);   // "DESC" or "ASC" only, never raw input
+  var sql: u8[>..] = [];
+  sql.append("SELECT id, name, age FROM kv ORDER BY ");
+  sql.append(col);
+  sql.push(' ');
+  sql.append(dir);
+  app.sql_json(db, sql[..]);
+  ```
 
 ## Multi-worker scaling & production deployment
 

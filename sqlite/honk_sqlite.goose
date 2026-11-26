@@ -300,3 +300,18 @@ inline fn sql_json_one_text(app: honk::Ctx&, db: Db&, sql: const u8[:], val: con
         }
     }
 }
+// Allowlisted ORDER BY direction: "DESC" for `desc` (any case), else "ASC".
+// SQL text must be 100% developer constants — user bytes enter ONLY through
+// `?N` bindings. Identifiers (columns/tables) need an allowlist branch in
+// app code; directions go through here. NEVER append raw input to SQL.
+inline fn order_dir(s: const u8[:]) -> const u8[:] {
+    if s.len == 4 {
+        let w = "desc";
+        var ok = true;
+        for k in 4 {
+            if !honk::eq_ci(s[k], w[k]) { ok = false; break; }
+        }
+        if ok { return "DESC"; }
+    }
+    return "ASC";
+}

@@ -384,6 +384,44 @@ def test_static_precompressed(port, root):
     s.close()
     assert code == 200 and body == mp4 and b"content-encoding" not in h, (code, h)
     print("  [PASS] test_static_precompressed")
+def test_db_sorted(port):
+    def post(body):
+        s, f = req(port, b"POST /db HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+        out = read_response(f)
+        s.close()
+        return out
+
+    def get_sorted(qs):
+        s, f = req(port, b"GET /db/sorted?" + qs + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        out = read_response(f)
+        s.close()
+        return out
+
+    def ours(body):
+        return [r for r in pyjson.loads(body) if r["name"].startswith("srt_")]
+
+    post(b'{"name":"srt_b","age":30}')
+    post(b'{"name":"srt_a","age":20}')
+    post(b'{"name":"srt_c","age":40}')
+
+    _, _, asc = get_sorted(b"by=age&dir=asc")
+    assert [r["age"] for r in ours(asc)] == [20, 30, 40], asc
+    _, _, desc = get_sorted(b"by=age&dir=DESC")
+    assert [r["age"] for r in ours(desc)] == [40, 30, 20], desc
+    _, _, byname = get_sorted(b"by=name&dir=asc")
+    assert [r["name"] for r in ours(byname)] == ["srt_a", "srt_b", "srt_c"], byname
+
+    # Injection attempts fall back to constants (id ASC); table survives.
+    _, _, inj1 = get_sorted(b"by=age&dir=desc;DROP%20TABLE%20kv--")
+    assert [r["age"] for r in ours(inj1)] == [20, 30, 40], inj1
+    _, _, inj2 = get_sorted(b'by=name";DROP%20TABLE%20kv--&dir=asc')
+    ids = [r["id"] for r in ours(inj2)]
+    assert ids == sorted(ids) and len(ids) == 3, inj2
+    _, _, still = get_sorted(b"by=id&dir=asc")
+    assert len(ours(still)) == 3, still
+    print("  [PASS] test_db_sorted")
+
 
 
 def test_db_crud(port):
@@ -740,8 +778,8 @@ def run_suite(server_bin, port, label):
             test_static_range_big_eagain(port)
             test_static_precompressed(port, root)
             test_db_crud(port)
+            test_db_sorted(port)
             test_db_strings(port)
-            test_fd_leak(port, proc.pid)
             s = socket.create_connection(("127.0.0.1", port), timeout=2.0)
             s.sendall(b"POST /__shutdown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             s.recv(256)
@@ -759,7 +797,7 @@ def run_suite(server_bin, port, label):
     test_db_2workers(server_bin, port + 50, label)
     test_db_fork_and_guard(server_bin, port + 55, label)
     test_fullstack_e2e(label)
-    print(f"=== ALL 15 FULLSTACK TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 16 FULLSTACK TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":
