@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Net suite: dual-stack IPv6, $HONK_BIND, Unix sockets (Release + ASan)."""
+import json as pyjson
 import os
+import signal
 import socket
 import stat
 import subprocess
@@ -170,6 +172,22 @@ def test_unix(server_bin, label, workers):
                 code, _, body = read_response(f)
                 s.close()
                 assert code == 200 and body == b"unix", (code, body)
+            if workers > 1:
+                # Shared pre-fork listener: prove BOTH workers accept. Unix
+                # sockets have no REUSEPORT balancing, so rapid conns stick to
+                # whoever is hot; STOP the child to force parent-side accept.
+                kids = subprocess.run(["pgrep", "-P", str(proc.pid)],
+                                        capture_output=True, text=True)
+                child = int(kids.stdout.strip().split()[0])
+                os.kill(child, signal.SIGSTOP)
+                try:
+                    for _ in range(3):
+                        s, f = req_unix(path, b"GET /wid HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                        code, _, body = read_response(f)
+                        s.close()
+                        assert code == 200 and pyjson.loads(body) == {"worker": 0}, body
+                finally:
+                    os.kill(child, signal.SIGCONT)
             proc.terminate()
             assert proc.wait(timeout=10) == 0
         finally:

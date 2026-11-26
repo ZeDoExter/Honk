@@ -7,6 +7,9 @@ import honk.src.honk_ws.honk_ws;
 
 fn net_routes(app: honk::Ctx&) {
     app.get("/my-ip") { app.ok(app.client_ip()); };
+    app.get("/wid") {
+        app.json() { j => j.set("worker", honk_worker_id() as! i64); };
+    };
     app.ws("/ws") { msg, ws => ws.send(msg); };
     app.post("/__shutdown") {
         honk_request_stop();
@@ -25,8 +28,11 @@ fn main() {
     print("app_net on ", target);
     flush_stdout();
     if target.len >= 5 && target[..5] == "unix:" {
-        if workers >= 0 { honk::workers(workers); }
-        honk::listen_at(target, 0) { app => net_routes(app); };
+        if workers >= 0 {
+            honk::listen_at_workers(target, 0, workers) { app => net_routes(app); };
+        } else {
+            honk::listen_at(target, 0) { app => net_routes(app); };
+        }
     } else {
         let port = honk::arg_port(18080);
         if workers >= 0 {

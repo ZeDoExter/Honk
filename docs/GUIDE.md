@@ -232,8 +232,13 @@ gzip -9 -k public/app.js && brotli -q 11 -k public/app.js
 honk::listen_at("unix:/run/honk/app.sock", 0) { app => … };  // shared by all HONK_WORKERS
 honk::listen_at("127.0.0.1", 8080) { app => … };             // v4 loopback only
 honk::listen_at("::1", 8080) { app => … };                   // v6 loopback only
+honk::listen_at_workers("unix:/run/honk/app.sock", 0, 4) { app => … };  // explicit N
 // HONK_BIND=127.0.0.1 ./main 8080                            // same via env on listen()
 ```
+
+Rule: the bind spec must be set **before** forking (`listen_at*` /
+`$HONK_BIND` do this; bare `honk::workers(n)` + `listen_at` aborts loudly for
+unix since a post-fork bind cannot be shared).
 
 Nginx → Unix socket (no TCP, no ports):
 

@@ -164,6 +164,7 @@ static char g_bind_spec[256] = {0};
 static char g_unix_path[108] = {0};
 static int g_unix_listen_fd = -1;
 static pid_t g_unix_owner_pid = 0;
+static pthread_mutex_t g_unix_bind_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void honk_sig_handler(int sig) {
     if (sig == SIGINT) {
@@ -540,8 +541,18 @@ int32_t honk_worker_init(int32_t port) {
     const char *spec = honk_resolve_bind();
     int fd = -1;
     if (strncmp(spec, "unix:", 5) == 0) {
-        if (g_unix_listen_fd < 0 && honk_unix_bind_inner(spec + 5) < 0) {
-            return -1;
+        if (g_unix_listen_fd < 0) {
+            if (g_num_children > 0 || g_parent_pid != 0) {
+                fprintf(stderr, "honk: unix bind requires honk_set_bind() before fork; "
+                                "use honk::listen_at*() or set $HONK_BIND\n");
+                fflush(stderr);
+                return -1;
+            }
+            pthread_mutex_lock(&g_unix_bind_mtx);
+            int brc = 0;
+            if (g_unix_listen_fd < 0) brc = honk_unix_bind_inner(spec + 5);
+            pthread_mutex_unlock(&g_unix_bind_mtx);
+            if (brc < 0) return -1;
         }
         fd = g_unix_listen_fd;
     } else {
@@ -847,37 +858,98 @@ int32_t honk_conn_ws_slot(int32_t fd) {
     return tls_conns[fd].ws_slot;
 }
 
-/* Raw non-blocking read for upgraded connections. Appends available bytes to
- * the turn's rx_buf (no partial_rx stash; the caller owns cross-turn state).
- * Returns bytes appended (>0), 0 on EAGAIN (fd stays open), or -1 on
+/* Raw non-blocking read for upgraded connections. Prepends any stashed
+ * partial_rx, then appends available bytes to the turn's rx_buf. Returns
+ * bytes in rx_buf (>0), 0 on EAGAIN (fd stays open, stash kept), or -1 on
  * EOF/error (connection closed). Caps one turn at 1 MiB (level-triggered
  * epoll re-fires for the rest). */
 int32_t honk_ws_poll(int32_t fd, gs_rref rx_buf) {
+    honk_rref_reset(rx_buf);
     if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) {
         return -1;
     }
     honk_conn_t *c = &tls_conns[fd];
-    int64_t total = 0;
+    if (c->partial_rx_len > 0) {
+        honk_rref_append(rx_buf, c->partial_rx, (int64_t)c->partial_rx_len);
+    }
+    int64_t total_new = 0;
     for (;;) {
         ssize_t n = recv(fd, honk_rref_write_ptr(rx_buf), HONK_RECV_CHUNK, 0);
         if (n > 0) {
             honk_rref_commit(rx_buf, (int64_t)n);
-            total += (int64_t)n;
+            total_new += (int64_t)n;
             if (n < HONK_RECV_CHUNK || honk_rref_len(rx_buf) >= 1048576) break;
             continue;
         }
         if (n == 0) {
-            if (total > 0) break;
+            if (total_new > 0) break;
+            honk_rref_reset(rx_buf);
             close_conn_fd(fd);
             return -1;
         }
         if (n < 0 && errno == EINTR) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (total_new == 0) {
+                honk_rref_reset(rx_buf);
+                return 0;
+            }
+            break;
+        }
+        honk_rref_reset(rx_buf);
         close_conn_fd(fd);
         return -1;
     }
-    if (total > 0) c->last_active_ms = tls_now_ms;
-    return (int32_t)total;
+    if (c->partial_rx) {
+        free(c->partial_rx);
+        c->partial_rx = NULL;
+        c->partial_rx_len = 0;
+        c->partial_rx_cap = 0;
+    }
+    c->last_active_ms = tls_now_ms;
+    return (int32_t)honk_rref_len(rx_buf);
+}
+
+/* End a WS turn: stash rx_buf[consumed..] in partial_rx for the next turn
+ * and reset the stack top. Unlike honk_conn_finish, never arms the header
+ * (slowloris) timeout: partial WS frames may legally gap longer than 10s;
+ * the 30s idle timeout and the 1 MiB stash cap still bound abuse. */
+void honk_ws_finish(int32_t fd, gs_rref rx_buf, int32_t consumed) {
+    int64_t total_len = honk_rref_len(rx_buf);
+    uint8_t *base = honk_rref_data(rx_buf);
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) {
+        honk_rref_reset(rx_buf);
+        return;
+    }
+    honk_conn_t *c = &tls_conns[fd];
+    int64_t rem = total_len - (int64_t)consumed;
+    if (rem > 0) {
+        if (rem > HONK_MAX_PARTIAL_RX) {
+            honk_rref_reset(rx_buf);
+            close_conn_fd(fd);
+            return;
+        }
+        if ((size_t)rem > c->partial_rx_cap) {
+            size_t new_cap = c->partial_rx_cap ? c->partial_rx_cap : 1024;
+            while (new_cap < (size_t)rem) new_cap *= 2;
+            if (new_cap > HONK_MAX_PARTIAL_RX) new_cap = HONK_MAX_PARTIAL_RX;
+            uint8_t *nb = (uint8_t *)realloc(c->partial_rx, new_cap);
+            if (!nb) {
+                honk_rref_reset(rx_buf);
+                close_conn_fd(fd);
+                return;
+            }
+            c->partial_rx = nb;
+            c->partial_rx_cap = new_cap;
+        }
+        memcpy(c->partial_rx, base + consumed, (size_t)rem);
+        c->partial_rx_len = (size_t)rem;
+    } else if (c->partial_rx) {
+        free(c->partial_rx);
+        c->partial_rx = NULL;
+        c->partial_rx_len = 0;
+        c->partial_rx_cap = 0;
+    }
+    honk_rref_reset(rx_buf);
 }
 
 /* Append frame payload to the assembling message (lazy realloc, 1 MiB cap).

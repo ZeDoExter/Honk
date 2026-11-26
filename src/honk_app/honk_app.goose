@@ -114,6 +114,17 @@ fn listen_at<F>(bind_spec: const u8[:], port: i32) {
     };
     honk_fork_join();
 }
+// Explicit multi-worker `listen_at` (binds before fork, so Unix pre-bind works).
+fn listen_at_workers<F>(bind_spec: const u8[:], port: i32, n: i32) {
+    honk_set_bind(bind_spec);
+    honk_fork_workers(n);
+    honk_set_timeouts(30000, 10000);
+    guard honk_worker_init(port) == 0 else { abort("honk_worker_init failed"); }
+    serve() { fd, date =>
+        request_app(fd, date) { app => F(app); };
+    };
+    honk_fork_join();
+}
 
 // Explicit multi-worker variant of listen() (n = 0 for auto CPU count, 1..64).
 fn listen_workers<F>(port: i32, n: i32) {

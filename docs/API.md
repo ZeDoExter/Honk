@@ -22,6 +22,7 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 |---|---|
 | `honk::listen(port: i32) { app => … };` | 1 worker by default, or `$HONK_WORKERS` (`1..64` / `"auto"`) `SO_REUSEPORT` processes; auto `404`/`405`; drains up to `2s` on `SIGINT`/`SIGTERM` |
 | `honk::listen_at(bind, port) { app => … };` | Explicit bind: `"0.0.0.0"`, `"127.0.0.1"`, `"::"`, `"::1"`, v6 literal, `"v6only:::"`, or `"unix:/path.sock"` (`$HONK_BIND` or `"::"` when using `listen`) |
+| `honk::listen_at_workers(bind, port, n) { app => … };` | Explicit-bind + explicit workers (binds before fork, required for shared unix accept) |
 | `honk::listen_workers(port: i32, n: i32) { app => … };` | Explicit multi-worker `listen` (`0` = `sched_getaffinity` CPU count, `1..64`) |
 | `honk::workers(n: i32) -> i32` / `honk::workers_env() -> i32` | Pre-`db_open()` worker fork (`0` = auto, `1..64`, or `$HONK_WORKERS`) |
 | `honk::arg_port(default_port: i32) -> i32` | Reads `argv[1]` when in `1..65535`, else `default_port` |
