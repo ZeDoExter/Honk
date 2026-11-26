@@ -131,3 +131,11 @@
 - **Decision**:
   1. **Opt-in pure-Goose `src/honk_ws/honk_ws.goose` + poll-sliced shim helpers**: Implements FIPS 180-4 SHA-1 + Base64 `Sec-WebSocket-Accept` handshake (`101` / `426` / `400`), enforces RFC 6455 §5.1 client frame masking (`1002`), auto-replies `Pong` to `Ping`, reassembles fragmented messages (`<= 1 MiB`, else `1009`), and resets `msg_buf` via `honk_buf_reset` on every message so long-lived WebSockets run at flat RSS while checking `honk_should_stop()` every `100 ms` for instant `SIGINT`/`SIGTERM` shutdown.
   2. **Opt-in `src/honk_openapi/honk_openapi.goose`**: `app.openapi(route, title, version) { spec => … }` translates Honk `:param`/`*` patterns to OpenAPI `{param}` templates + typed path parameters, merges same-path methods into valid single-key JSON objects, and pairs with `app.docs(route, spec_url, title)` for zero-dependency interactive Scalar docs (`0` bytes in apps not importing it).
+
+## D-019: Toolchain Reproducibility — Pin-by-Hash, Fingerprints, No Vendor Blob
+- **Context**: Honk builds on a Goose compiler pinned to commit `2239b92eb` (ahead of upstream tag `v2026.4`); a silent toolchain drift would invalidate every benchmark and sanitizer gate.
+- **Decision**:
+  1. **Pin-by-hash, not vendoring**: `goose_repo/` (119 MB with build outputs, 28 MB source-only) stays git-ignored and is cloned + checked out to `PINNED_GOOSE` by `./honk setup`; committing the blob would bloat the repo for zero gain.
+  2. **Enforcement + audit trail**: `./honk doctor` fails when the checkout drifts from the pin (and warns on a dirty tree); every `./honk build` stamps a `<binary>.build-info` sidecar (goose version/commit, cc, honk HEAD, asan, timestamp).
+  3. **CI is the clean room**: `.github/workflows/ci.yml` runs `setup` + full `./honk test` from scratch on every push; a green CI run is the reproducibility proof.
+  4. **Upstream tracking**: re-pin only onto a newer upstream *tag* (currently ahead of `v2026.4`); until one lands, the pin + fingerprint above is the policy.
