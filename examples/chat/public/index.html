@@ -25,7 +25,7 @@
   <button id="send" disabled>Send</button>
 </div>
 <script>
-let ws = null;
+let ws = null, hbTimer = null, myUser = "", myRoom = "", myToken = "";
 const log = document.getElementById("log");
 function line(who, text) {
   const d = document.createElement("div");
@@ -33,20 +33,8 @@ function line(who, text) {
   log.appendChild(d);
   log.scrollTop = log.scrollHeight;
 }
-document.getElementById("join").onclick = async () => {
-  const user = document.getElementById("user").value.trim();
-  const room = document.getElementById("room").value.trim() || "lobby";
-  if (!user) { alert("username required"); return; }
-  const lr = await fetch("/login", { method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user }) });
-  if (!lr.ok) { alert("login failed: " + lr.status); return; }
-  const { token } = await lr.json();
-  const hr = await fetch("/history/" + encodeURIComponent(room));
-  if (hr.ok) {
-    for (const m of (await hr.json()).reverse()) line(m.user, m.text);
-  }
-  ws = new WebSocket(`ws://${location.host}/ws/${encodeURIComponent(room)}?token=${encodeURIComponent(token)}`);
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws/${encodeURIComponent(myRoom)}?token=${encodeURIComponent(myToken)}`);
   ws.onmessage = (ev) => {
     try {
       const m = JSON.parse(ev.data);
@@ -56,16 +44,42 @@ document.getElementById("join").onclick = async () => {
   ws.onopen = () => {
     document.getElementById("msg").disabled = false;
     document.getElementById("send").disabled = false;
-    document.getElementById("join").disabled = true;
-    line("*", "joined #" + room + " as " + user);
+    // Join instantly + beat the 30s idle timeout (browsers can't WS-ping).
+    ws.send('{"hb":1}');
+    clearInterval(hbTimer);
+    hbTimer = setInterval(() => { if (ws.readyState === 1) ws.send('{"hb":1}'); }, 25000);
+    line("*", "connected to #" + myRoom + " as " + myUser);
   };
-  ws.onclose = () => line("*", "disconnected");
+  ws.onclose = () => {
+    clearInterval(hbTimer);
+    document.getElementById("msg").disabled = true;
+    document.getElementById("send").disabled = true;
+    line("*", "disconnected — retrying…");
+    setTimeout(connect, 2000);
+  };
+}
+document.getElementById("join").onclick = async () => {
+  myUser = document.getElementById("user").value.trim();
+  myRoom = document.getElementById("room").value.trim() || "lobby";
+  if (!myUser) { alert("username required"); return; }
+  const lr = await fetch("/login", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user: myUser }) });
+  if (!lr.ok) { alert("login failed: " + lr.status); return; }
+  myToken = (await lr.json()).token;
+  const hr = await fetch("/history/" + encodeURIComponent(myRoom));
+  if (hr.ok) {
+    for (const m of (await hr.json()).reverse()) line(m.user, m.text);
+  }
+  document.getElementById("join").disabled = true;
+  connect();
 };
 function send() {
   const box = document.getElementById("msg");
   const text = box.value;
   if (!text || !ws || ws.readyState !== 1) return;
   ws.send(text);
+  line(myUser + " (you)", text);
   box.value = "";
 }
 document.getElementById("send").onclick = send;

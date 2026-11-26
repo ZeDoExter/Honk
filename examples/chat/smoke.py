@@ -102,6 +102,19 @@ try:
     code, hist2 = http("GET", "/history/other")
     assert code == 200 and [r["text"] for r in pyjson.loads(hist2)] == ["lonely"], hist2
 
+    # Heartbeat joins without broadcasting or persisting.
+    sd, fd_ = ws_connect("l1", tok_a)
+    assert fd_.readline().startswith(b"HTTP/1.1 101")
+    while fd_.readline() not in (b"\r\n", b"\n", b""):
+        pass
+    sd.sendall(frame(b'{"hb":1}'))
+    sa.sendall(frame(b"after-hb"))
+    assert read_msg(fb) == {"user": "ada", "text": "after-hb"}
+    assert read_msg(fd_) == {"user": "ada", "text": "after-hb"}
+    code, hist3 = http("GET", "/history/l1")
+    assert all(r["text"] != '{"hb":1}' for r in pyjson.loads(hist3)), hist3
+    sd.close()
+
     s_bad, f_bad = ws_connect("l1", "bogus")
     assert f_bad.readline().startswith(b"HTTP/1.1 401"), "bad token must 401"
     s_bad.close()

@@ -15,6 +15,8 @@ SQLite history, and per-message rate limits end to end.
 - **Auth**: JWT (`HS256`, 24h) from `POST /login {"user":...}` (1–32 chars),
   verified at handshake from `?token=`; message turns reuse the stored identity.
 - **History**: every message persists (`msgs` table); `GET /history/:room`
-  returns the latest 50 (newest first). All SQL uses `?N` bindings.
 - **Limits**: 120 msgs/min per IP, 512-byte messages, 256 members, 1024
   upgrades/worker (core caps) — overfull rooms get WS close `1013`.
+- **Presence**: browsers can't WS-ping, so the client sends `{"hb":1}` on
+  connect + every 25s (beats the 30s idle timeout, joins instantly, never
+  broadcast or stored) and auto-reconnects on close.

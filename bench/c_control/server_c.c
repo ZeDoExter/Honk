@@ -1,4 +1,4 @@
-/* server_c.c -- Bare-C epoll + picohttpparser reference server (transport baseline). */
+/* server_c.c -- Bare-C epoll + picohttpparser reference server (transport baseline).
  * Matches Honk's exact work per turn (1 Hz Date cache, monotonic timestamp,
  * direct recv into turn buffer with lazy per-connection partial_rx and pending_tx,
  * strict Content-Length / Transfer-Encoding / header & body size checks,

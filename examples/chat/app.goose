@@ -50,6 +50,11 @@ fn chat_broadcast(app: honk::Ctx&, msg: const u8[:], ws: honk::Ws&, db: Db&) {
             return;
         }
     }
+    // App-level heartbeat (browsers can't WS-ping): joins + refreshes the
+    // 30s idle timeout, but is never broadcast or stored.
+    if msg == "{\"hb\":1}" {
+        return;
+    }
     if msg.len == 0 || msg.len > 512 {
         return;
     }
