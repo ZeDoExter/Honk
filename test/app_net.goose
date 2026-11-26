@@ -7,9 +7,7 @@ import honk.src.honk_ws.honk_ws;
 
 fn net_routes(app: honk::Ctx&) {
     app.get("/my-ip") { app.ok(app.client_ip()); };
-    app.ws("/ws") { ws =>
-        ws.each_msg() { msg => ws.send(msg); };
-    };
+    app.ws("/ws") { msg, ws => ws.send(msg); };
     app.post("/__shutdown") {
         honk_request_stop();
         app.text(200, "bye");

@@ -1,13 +1,12 @@
-// honk_ws.goose -- opt-in RFC 6455 WebSocket handshake + frame reader/writer (`honk::`).
+// honk_ws.goose -- opt-in RFC 6455 WebSockets over the shared epoll loop (`honk::`).
 //
 // Opt-in submodule (`import honk.src.honk_ws.honk_ws;`): pure-Goose FIPS 180-4
-// SHA-1 + Base64 `Sec-WebSocket-Accept` handshake (`101 Switching Protocols`),
-// masked client frame validation, automatic `Ping` -> `Pong`, fragmented message
-// reassembly (<= 1 MiB), and zero-growth per-message data-stack resets.
+// SHA-1 + Base64 `Sec-WebSocket-Accept` handshake (`101 Switching Protocols`)
+// plus per-message dispatch. Upgraded connections multiplex on the worker's
+// epoll loop (frames in core turns, one message callback per turn) instead of
+// pinning a worker: many idle sockets share one thread at flat RSS.
 //
-//   app.ws("/ws/:room") { ws =>
-//       ws.each_msg() { msg => ws.send(msg); };
-//   };
+//   app.ws("/ws/:room") { msg, ws => ws.send(msg); };
 
 namespace honk;
 
@@ -177,69 +176,47 @@ inline fn hdr_has_token_ci(hdr: const u8[:], want: const u8[:]) -> bool {
 
 struct Ws {
     fd: i32,
-    timeout_ms: i32,
+    slot: i64,
+    opcode: i64,
     closed: bool,
-    close_sent: bool,
 }
 
-inline fn set_timeout(ws: Ws&, timeout_ms: i32) {
-    ws.timeout_ms = timeout_ms;
-}
-
-// Send an unmasked RFC 6455 server-to-client frame (`FIN = 1`).
-fn send_frame(ws: Ws&, opcode: i64, payload: const u8[:]) -> bool {
-    if ws.closed || ws.fd < 0 { return false; }
-    var frame: u8[>..] = [];
-    frame.push((0x80 | (opcode & 0x0f)) as! u8);
-    let n = payload.len;
-    if n < 126 {
-        frame.push(n as! u8);
-    } else if n <= 65535 {
-        frame.push(126);
-        frame.push(((n >> 8) & 0xff) as! u8);
-        frame.push((n & 0xff) as! u8);
-    } else {
-        frame.push(127);
-        for s in 8 {
-            let sh = (7 - s) * 8;
-            frame.push(((n >> sh) & 0xff) as! u8);
-        }
-    }
-    frame.append(payload);
-    if honk_ws_send_all(ws.fd, frame, ws.timeout_ms) < 0 {
-        ws.closed = true;
+inline fn send(w: Ws&, text: const u8[:]) -> bool {
+    if w.closed { return false; }
+    if !honk::ws_send_frame(w.fd, 1, text) {
+        w.closed = true;
         return false;
     }
     return true;
 }
 
-inline fn send(ws: Ws&, text: const u8[:]) -> bool {
-    return ws.send_frame(1, text);
-}
-
-inline fn send_bytes(ws: Ws&, data: const u8[:]) -> bool {
-    return ws.send_frame(2, data);
-}
-
-inline fn send_json<F>(ws: Ws&) -> bool {
-    var jbuf: u8[>..] = [];
-    var w = JWriter { out: jbuf, first: true };
-    json_run(w) { j => F(j); };
-    return ws.send_frame(1, jbuf);
-}
-
-inline fn ping(ws: Ws&, payload: const u8[:] = "") -> bool {
-    let n = if payload.len <= 125 { payload.len } else { 125 };
-    return ws.send_frame(9, payload[..n]);
-}
-
-fn close(ws: Ws&, code: i64 = 1000) {
-    if !ws.close_sent && ws.fd >= 0 {
-        var cbuf: u8[2] = [((code >> 8) & 0xff) as! u8, (code & 0xff) as! u8];
-        ws.close_sent = true;
-        ws.send_frame(8, cbuf[..]);
+inline fn send_bytes(w: Ws&, data: const u8[:]) -> bool {
+    if w.closed { return false; }
+    if !honk::ws_send_frame(w.fd, 2, data) {
+        w.closed = true;
+        return false;
     }
-    ws.closed = true;
+    return true;
+}
+
+inline fn send_json<F>(w: Ws&) -> bool {
+    var jbuf: u8[>..] = [];
+    var jw = JWriter { out: jbuf, first: true };
+    json_run(jw) { j => F(j); };
+    return w.send(jbuf);
+}
+
+inline fn ping(w: Ws&, payload: const u8[:] = "") -> bool {
+    if w.closed { return false; }
+    let n = if payload.len <= 125 { payload.len } else { 125 };
+    return honk::ws_send_frame(w.fd, 9, payload[..n]);
+}
+
+fn close(w: Ws&, code: i64 = 1000) {
+    if !w.closed && w.fd >= 0 {
+        honk::ws_close_fd(w.fd, w.slot, code);
+    }
+    w.closed = true;
 }
 // Strict UTF-8 validity for text messages (RFC 6455 §8.1): rejects
 // overlong encodings, surrogate halves, and codepoints above U+10FFFF.
@@ -275,162 +252,23 @@ fn ws_utf8_valid(s: const u8[:]) -> bool {
     return true;
 }
 
-// Read the next complete WebSocket data message into `msg_buf` (resetting `msg_buf` first).
-// Automatically answers `Ping` with `Pong`, handles `Close`, and reassembles fragments (<= 1 MiB).
-// Returns `(payload_slice, opcode, ok)`.
-fn recv_into(ws: Ws&, msg_buf: u8[>..]&) -> const u8[:], i64, bool {
-    honk_buf_reset(msg_buf);
-    if ws.closed || ws.fd < 0 { return "", 0, false; }
-
-    let max_msg: i64 = 1048576;
-    var msg_opcode: i64 = 0;
-    var in_frag = false;
-
-    loop {
-        var hdr: u8[>..] = [];
-        if honk_ws_recv_exact(ws.fd, hdr, 2, ws.timeout_ms) != 2 {
-            ws.closed = true;
-            return "", 0, false;
-        }
-        let b0 = hdr[0];
-        let b1 = hdr[1];
-        let fin = (b0 & 0x80) != 0;
-        let rsv = b0 & 0x70;
-        let opcode: i64 = b0 & 0x0f;
-        let masked = (b1 & 0x80) != 0;
-        var plen: i64 = b1 & 0x7f;
-
-        // RFC 6455 §5.1 / §5.2: RSV bits must be 0; client frames MUST be masked.
-        if rsv != 0 || !masked {
-            ws.close(1002);
-            return "", 0, false;
-        }
-
-        let is_ctrl = (opcode & 0x08) != 0;
-        if is_ctrl && (!fin || plen > 125) {
-            ws.close(1002);
-            return "", 0, false;
-        }
-
-        if plen == 126 {
-            honk_buf_reset(hdr);
-            if honk_ws_recv_exact(ws.fd, hdr, 2, ws.timeout_ms) != 2 {
-                ws.closed = true;
-                return "", 0, false;
-            }
-            plen = ((hdr[0] as! i64) << 8) | hdr[1];
-        } else if plen == 127 {
-            honk_buf_reset(hdr);
-            if honk_ws_recv_exact(ws.fd, hdr, 8, ws.timeout_ms) != 8 {
-                ws.closed = true;
-                return "", 0, false;
-            }
-            if (hdr[0] & 0x80) != 0 {
-                ws.close(1002);
-                return "", 0, false;
-            }
-            var len64: u64 = 0;
-            for k in 8 {
-                len64 = (len64 << 8) | hdr[k];
-            }
-            if len64 > (max_msg as! u64) {
-                ws.close(1009);
-                return "", 0, false;
-            }
-            plen = len64 as! i64;
-        }
-
-        if plen > max_msg || (!is_ctrl && msg_buf.len + plen > max_msg) {
-            ws.close(1009);
-            return "", 0, false;
-        }
-
-        honk_buf_reset(hdr);
-        if honk_ws_recv_exact(ws.fd, hdr, 4, ws.timeout_ms) != 4 {
-            ws.closed = true;
-            return "", 0, false;
-        }
-        let mask_be: i32 = (((hdr[0] as! u32) << 24)
-                         | ((hdr[1] as! u32) << 16)
-                         | ((hdr[2] as! u32) << 8)
-                         | hdr[3]) as! i32;
-
-        if is_ctrl {
-            var ctrl: u8[>..] = [];
-            if plen > 0 {
-                if honk_ws_recv_exact(ws.fd, ctrl, plen as! i32, ws.timeout_ms) != (plen as! i32) {
-                    ws.closed = true;
-                    return "", 0, false;
-                }
-                honk_ws_unmask(ctrl, 0, plen, mask_be);
-            }
-            if opcode == 8 {
-                // Close frame: echo close code (or 1000) and stop.
-                let code: i64 = if ctrl.len >= 2 { ((ctrl[0] as! i64) << 8) | ctrl[1] } else { 1000 };
-                ws.close(code);
-                return "", 0, false;
-            } else if opcode == 9 {
-                // Ping -> automatic Pong with identical payload.
-                ws.send_frame(10, ctrl);
-            } else if opcode != 10 {
-                ws.close(1002);
-                return "", 0, false;
-            }
-            continue;
-        }
-
-        // Data frame (`1` text, `2` binary, `0` continuation)
-        if !in_frag {
-            if opcode != 1 && opcode != 2 {
-                ws.close(1002);
-                return "", 0, false;
-            }
-            msg_opcode = opcode;
-            in_frag = !fin;
-        } else {
-            if opcode != 0 {
-                ws.close(1002);
-                return "", 0, false;
-            }
-            if fin { in_frag = false; }
-        }
-
-        let off = msg_buf.len;
-        if plen > 0 {
-            if honk_ws_recv_exact(ws.fd, msg_buf, plen as! i32, ws.timeout_ms) != (plen as! i32) {
-                ws.closed = true;
-                return "", 0, false;
-            }
-            honk_ws_unmask(msg_buf, off, plen, mask_be);
-        }
-
-        if fin {
-            if msg_opcode == 1 && !ws_utf8_valid(msg_buf[..]) {
-                ws.close(1007);
-                return "", 0, false;
-            }
-            return msg_buf[..], msg_opcode, true;
-        }
-    }
-}
-
-// Loop over incoming WebSocket messages until peer close, timeout, or server stop.
-inline fn each_msg<F>(ws: Ws&) {
-    var msg_buf: u8[>..] = [];
-    while !ws.closed {
-        let msg, _op, ok = ws.recv_into(msg_buf);
-        if !ok { break; }
-        F(msg);
-    }
-}
-
-inline fn ws_run<F>(ws: Ws&) {
-    F(ws);
-}
-
-// Upgrade matching `GET` requests to RFC 6455 WebSocket (`101 Switching Protocols`).
+// Upgrade matching GETs (101 + slot claim) or dispatch message turns.
+// Callback form: `app.ws("/ws/:room") { msg, ws => ws.send(msg); };`
 inline fn ws<F>(app: Ctx&, route: const u8[:]) {
     if app.handled { return; }
+    if app.ws_msg {
+        let mok = match_route(app, route);
+        if !mok { return; }
+        app.path_matched = true;
+        app.handled = true;
+        var w = Ws { fd: app.fd, slot: app.ws_slot, opcode: honk::ws_slot_opcode(app.ws_slot), closed: false };
+        if w.opcode == 1 && !ws_utf8_valid(app.body) {
+            w.close(1007);
+            return;
+        }
+        F(app.body, w);
+        return;
+    }
     let ok = match_route(app, route);
     if ok { app.path_matched = true; }
     if app.method == "GET" && !app.head_only && ok {
@@ -458,6 +296,13 @@ inline fn ws<F>(app: Ctx&, route: const u8[:]) {
                 app.set_header("Sec-WebSocket-Accept", accept);
             } else {
                 emit_server_timing(app);
+                let si = honk::ws_slot_alloc(app.fd);
+                if si < 0 {
+                    if app.json_err_mode { app.json_error(503, "too many websocket connections"); }
+                    else { app.text(503, "Service Unavailable"); }
+                    app.keep_alive = false;
+                    return;
+                }
                 var hs: u8[>..] = [];
                 hs.append("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
                 hs.append(accept);
@@ -472,13 +317,17 @@ inline fn ws<F>(app: Ctx&, route: const u8[:]) {
                 }
                 hs.append("\r\n\r\n");
                 app.sent = true;
-                if honk_ws_send_all(app.fd, hs, 5000) == 0 {
-                    var sock = Ws { fd: app.fd, timeout_ms: 30000, closed: false, close_sent: false };
-                    ws_run(sock) { w => F(w); };
-                    if !sock.close_sent && !sock.closed {
-                        sock.close(1000);
-                    }
+                if honk_send(app.fd, hs) < 0 {
+                    honk::ws_slot_free(si);
+                    return;
                 }
+                var aux: u8[>..] = [];
+                aux.append(app.base_path);
+                aux.append(app.user);
+                honk_ws_aux_set(app.fd, aux[..]);
+                honk::ws_slot_aux_meta(si, app.base_path.len, app.user.len, app.authed);
+                honk_ws_upgrade(app.fd, si as! i32);
+                app.ws_upgraded_now = true;
             }
         }
     }

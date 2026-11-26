@@ -302,11 +302,7 @@ fn api_routes(app: honk::Ctx&) {
     };
 
     // v0.7.0: RFC 6455 WebSocket upgrade + OpenAPI 3.1.0 + Docs UI
-    app.ws("/ws/:room") { ws =>
-        ws.each_msg() { msg =>
-            ws.send(msg);
-        };
-    };
+    app.ws("/ws/:room") { msg, ws => ws.send(msg); };
 
     app.openapi("/openapi.json", "Unit API", "0.7.0") { spec =>
         spec.desc("Test spec");

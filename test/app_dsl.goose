@@ -161,13 +161,10 @@ fn dsl_routes(app: honk::Ctx&) {
                 };
             }
         };
-        app.ws("/ws/:room") { ws =>
-            let room = app.param("room");
-            ws.each_msg() { msg =>
-                ws.send_json() { j =>
-                    j.set("room", room);
-                    j.set("msg", msg);
-                };
+        app.ws("/ws/:room") { msg, ws =>
+            ws.send_json() { j =>
+                j.set("room", app.param("room"));
+                j.set("msg", msg);
             };
         };
         app.openapi("/openapi.json", "DSL API", "0.7.0") { spec =>
