@@ -24,6 +24,7 @@ struct Ctx {
     // Zero-copy request views into rx_buf.
     method: const u8[:],
     path: const u8[:],    // query string stripped
+    base_path: const u8[:],   // path at construction (pre-group-strip; WS redispatch)
     query_str: const u8[:],   // raw query without '?'
     body: const u8[:],
     hdrs: const u8[:],    // raw header block (request line excluded)
@@ -67,6 +68,9 @@ struct Ctx {
     resp_len: i64,         // >= 0 overrides Content-Length (HEAD/empty); -1 = body.len
     sent: bool,            // static response queued for direct send (skip emit)
     date: const u8[:],     // cached Date header value for this turn
+    ws_msg: bool,          // message turn (re-dispatched WS): guards skip, no emit
+    ws_slot: i64,          // Goose WS slot (-1 unless ws_msg)
+    ws_upgraded_now: bool, // handshake claimed this turn: adopt tail, skip HTTP send
 }
 
 // Build a Ctx from parsed request slices. full_path still carries '?query'.
@@ -82,6 +86,7 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
     return Ctx {
         method: method,
         path: path,
+        base_path: path,
         query_str: q,
         body: body,
         hdrs: hdrs,
@@ -113,6 +118,9 @@ fn make_ctx(method: const u8[:], full_path: const u8[:], body: const u8[:],
         resp_len: -1,
         sent: false,
         date: date,
+        ws_msg: false,
+        ws_slot: -1,
+        ws_upgraded_now: false,
         ..
     };
 }

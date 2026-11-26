@@ -310,6 +310,11 @@ inline fn cors_cfg(app: Ctx&, allow: const u8[:],
 // stages `401` and marks `app.handled = true` so downstream routes/405 skip it.
 inline fn bearer<F>(app: Ctx&) {
     if app.handled { return; }
+    // Message turns carry no headers: auth was established at handshake.
+    if app.ws_msg {
+        F(app.user);
+        return;
+    }
     let tok, ok = app.bearer_token();
     if !ok {
         if app.json_err_mode {
