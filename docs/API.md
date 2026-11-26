@@ -5,7 +5,7 @@ All application-facing modules and functions. Honk ships `honk.goose` +
 opt-in unit testing in `src/honk_test/`):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.10.0";   // or relative "../Honk"
+import honk from "ZeDoExter/Honk@v1.0.0";   // or relative "../Honk"
 import honk.src.honk_auth.honk_auth;        // opt-in: JWT (HS256) + signed cookies
 import honk.src.honk_ws.honk_ws;            // opt-in: RFC 6455 WebSockets
 import honk.src.honk_openapi.honk_openapi;  // opt-in: OpenAPI 3.1.0 + Docs UI
@@ -123,5 +123,5 @@ helpers compile away completely so minimal binaries stay `~150 KiB`.
 
 ## WebSockets (`import honk.src.honk_ws.honk_ws;`) & OpenAPI (`import honk.src.honk_openapi.honk_openapi;`)
 
-- **WebSockets (`RFC 6455`)**: `app.ws(route) { ws => … };` (`101 Switching Protocols` + `426`/`400` validation), `ws.each_msg() { msg => … };`, `ws.recv_into(buf) -> slice, opcode, ok`, `ws.send(text)`, `ws.send_bytes(data)`, `ws.send_json() { j => … };`, `ws.ping(payload = "")`, `ws.close(code = 1000)`, `ws.set_timeout(ms)`, `honk::sha1(msg)`, `honk::b64_encode(src, out)`, `honk::ws_accept_key(key, out)`.
+- **WebSockets (`RFC 6455`, non-blocking)**: `app.ws(route) { msg, ws => … };` (one callback per message; `101` + `426`/`400`/`503` handshake), `ws.send(text)`, `ws.send_bytes(data)`, `ws.send_json() { j => … };`, `ws.ping(payload = "")`, `ws.close(code = 1000)`, `ws.opcode`, `honk::sha1(msg)`, `honk::b64_encode(src, out)`, `honk::ws_accept_key(key, out)`.
 - **OpenAPI `3.1.0` & Docs UI**: `app.openapi(route, title, version) { spec => … };` (`spec.desc`, `spec.server`, `spec.bearer_auth`, `spec.op`, `spec.op_int`, `spec.op_body`, `spec.op_auth`, `spec.op_raw` — auto `:param` → `{param}` conversion and same-path operation merging), `app.docs(route, spec_url, title = "API Reference", cdn_url = "…")` (self-hostable Scalar CDN URL).

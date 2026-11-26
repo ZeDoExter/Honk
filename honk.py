@@ -172,7 +172,7 @@ def cmd_setup(_args):
     return cmd_doctor([])
 
 
-HONK_GIT_SOURCE = "ZeDoExter/Honk@v0.10.0"
+HONK_GIT_SOURCE = "ZeDoExter/Honk@v1.0.0"
 
 SCAFFOLD_MAIN = '''// {name} -- a Honk application (no .build file needed).
 //

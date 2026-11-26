@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.0 — First Stable (Non-Blocking WebSockets)
+
+**Breaking (pre-1.0 API):** `app.ws(route)` is now a per-message callback
+(`{ msg, ws => … }`); blocking `ws.each_msg` / `ws.recv_into` / `ws.set_timeout`
+and C `honk_ws_{recv_exact,send_all,unmask}` are removed. Read `app.param()`
+INSIDE the callback (values captured outside dangle across turns).
+
+- Non-blocking WS turns: upgraded conns multiplex on the worker epoll loop
+  (core frame pump + Goose-global slots + C lazy message/aux buffers, 1024
+  upgrades/worker with 503 past it, fd-reuse revalidation); HTTP flows while
+  sockets idle; 1 MiB messages, masking/`Ping`/`Pong`/fragment/`1002`/`1007`/
+  `1009` semantics preserved; handshake replays pipelined tail (no more drop).
+- `stream()`/`sse()` stay blocking by design (server-push has no event source;
+  size `HONK_WORKERS`, see GUIDE).
+- SQLite: `order_dir()` allowlist helper + documented no-injection rule.
+- Toolchain: pin enforcement + `.build-info` fingerprints + green from-scratch
+  CI (incl. GCC 14+ forward-declaration fix).
+- Scope: Linux x86_64 + WSL2, Goose pinned `2239b92eb`, HTTP/1.1, semver API.
+
 ## v0.10.0 — Dual-Stack IPv6, Bind Control & Unix Domain Sockets
 
 ### Networking

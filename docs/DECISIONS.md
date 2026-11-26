@@ -139,3 +139,7 @@
   2. **Enforcement + audit trail**: `./honk doctor` fails when the checkout drifts from the pin (and warns on a dirty tree); every `./honk build` stamps a `<binary>.build-info` sidecar (goose version/commit, cc, honk HEAD, asan, timestamp).
   3. **CI is the clean room**: `.github/workflows/ci.yml` runs `setup` + full `./honk test` from scratch on every push; a green CI run is the reproducibility proof.
   4. **Upstream tracking**: re-pin only onto a newer upstream *tag* (currently ahead of `v2026.4`); until one lands, the pin + fingerprint above is the policy.
+
+## D-020: Non-Blocking WebSocket Turns (Core Pump + Opt-In Dispatch)
+- **Context**: Blocking `each_msg` loops pinned a whole worker per connection; idle sockets starved HTTP on small machines.
+- **Decision**: frame pump in core (`honk_serve`: Goose-global slim slots + C lazy message/aux buffers, C slot index as source of truth, fd-reuse revalidation), message turns re-dispatch the app block as `WSMSG` ctx (concrete path re-matched, params/user/authed restored, bearer bypassed, rate limits enforced per message), replies via EAGAIN-safe `honk_send`. `app.ws(route) { msg, ws => … }` per-message callback; handshake claims a slot (503 past 1024/worker). Blocking `recv_into`/`each_msg`/`honk_ws_{recv_exact,send_all,unmask}` removed. `stream()`/`sse()` stay blocking by design (server-push has no event source in Honk's model; size workers per GUIDE).

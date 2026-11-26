@@ -15,7 +15,7 @@ curl http://127.0.0.1:18080/               # Hello from my-api!
 A complete Hello World is **4 lines of Goose** (no `.build` file needed):
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.10.0";
+import honk from "ZeDoExter/Honk@v1.0.0";
 fn main() {
     honk::listen(18080) { app => app.get("/", "Hello, World!"); };
 }
@@ -25,7 +25,7 @@ Static routes, `:params`, `*` wildcards, and streaming JSON in **9 lines** —
 with automatic `404` / `405` handling and zero closure allocations:
 
 ```goose
-import honk from "ZeDoExter/Honk@v0.10.0";
+import honk from "ZeDoExter/Honk@v1.0.0";
 fn main() {
     honk::listen(18080) { app =>
         app.get("/health", "ok");
@@ -70,7 +70,7 @@ How it gets there:
 
 ```sh
 ./honk test                                # everything: 900k turns + suites + ASan
-./honk new my-api --git                    # standalone repo pinned to ZeDoExter/Honk@v0.10.0
+./honk new my-api --git                    # standalone repo pinned to ZeDoExter/Honk@v1.0.0
 ./honk build my-api --release              # -> my-api/dist/main, zero dependencies
 ./my-api/dist/main 8080                    # single worker (SIGINT/SIGTERM drains cleanly)
 HONK_WORKERS=auto ./my-api/dist/main 8080  # scale across all available CPU cores
@@ -150,7 +150,7 @@ no pre-serialized literals, no strawman configs.
 ## Capabilities & roadmap
 
 **Today**: `./honk` CLI (`setup`/`doctor`/`new [--git]`/`dev`/`build`/`test`),
-zero-sidecar `honk` package (`import honk from "ZeDoExter/Honk@v0.10.0";`),
+zero-sidecar `honk` package (`import honk from "ZeDoExter/Honk@v1.0.0";`),
 one-call `honk::listen` + unified pattern routing (`get`/`post`/`put`/`patch`/`delete`/`options`/`all`,
 nestable `app.group("/api")`, named `app.param("id")` + `param_dec` + suffixes like `/todos/:id/toggle`,
 `/*` `app.tail`, typed `*_int` routes, and automatic `404`/`405` tracking),
@@ -162,7 +162,7 @@ field-named `require_*` validators, URL-encoded forms (`app.form`, `require_form
 zero-copy RFC 7578 `multipart/form-data` file uploads (`app.multipart_file`, `each_part`),
 outbound HTTP/1.1 chunked streaming (`app.stream`) + Server-Sent Events (`app.sse`),
 inbound `Transfer-Encoding: chunked` request decoding (with `CL+TE` smuggling defense),
-opt-in RFC 6455 WebSockets (`honk_ws`: `app.ws`, `each_msg`, `send_json`, auto `Ping`/`Pong`),
+opt-in non-blocking RFC 6455 WebSockets (`honk_ws`: `app.ws` per-message callback, `send_json`, auto `Ping`/`Pong`),
 opt-in OpenAPI `3.1.0` + interactive Scalar Docs UI (`honk_openapi`: `app.openapi`, `app.docs`),
 `client_ip` / `real_ip`, kernel-`sendfile` static serving (`static_dir` +
 `ETag`/`304 Not Modified`) + single-binary compile-time `app.embed` (`embed_file`),
