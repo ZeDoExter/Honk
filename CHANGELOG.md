@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.1 — WS Memory Fix, Unix Bind Order, Fresh Benchmarks
+
+- Fixed `+10 MB` RSS regression from v1.0.0's 2 KiB-per-slot WS pool
+  (thread-spawn copies): slots are back to ~48B with frame tails stashed in
+  the existing `partial_rx` — idle RSS `2.1 MB` again, verified flat.
+- Fixed Unix-socket `EADDRINUSE` race when `workers(n)` forked before the
+  bind spec was set: new `honk::listen_at_workers()` orders bind-then-fork,
+  wrong order aborts loudly, and the suite proves both workers share accept.
+- Refreshed 10-framework shootout on current `master`: `95%` of bare C on
+  plaintext, `1.8–3.0×` the nearest rival on dynamic workloads (see README).
+- New `examples/chat/` dogfood app (rooms + JWT + SQLite + rate limits).
+
 ## v1.0.0 — First Stable (Non-Blocking WebSockets)
 
 **Breaking (pre-1.0 API):** `app.ws(route)` is now a per-message callback
