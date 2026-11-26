@@ -62,6 +62,7 @@ int32_t honk_should_stop(void);
 #define HONK_MAX_CHUNK_OVERHEAD 16384
 #define HONK_MAX_PARTIAL_RX     (HONK_MAX_HEADER_SIZE + HONK_MAX_BODY_SIZE + HONK_MAX_CHUNK_OVERHEAD)
 #define HONK_MAX_PENDING_TX     1048576
+#define HONK_WS_MAX_MSG         1048576
 
 #pragma pack(push, 1)
 typedef struct {
@@ -103,6 +104,15 @@ typedef struct {
     int _file_pad;
     int64_t sendfile_off;
     int64_t sendfile_remain;
+    /* Non-blocking WebSockets: Goose slot index (-1 = plain HTTP) plus lazy
+     * message/aux buffers (NULL when idle; freed exactly once on close). */
+    int32_t ws_slot;
+    int32_t _ws_pad;
+    uint8_t *ws_msg;
+    size_t ws_msg_len;
+    size_t ws_msg_cap;
+    uint8_t *ws_aux;
+    size_t ws_aux_len;
 } honk_conn_t;
 
 typedef struct {
@@ -262,6 +272,18 @@ static void close_conn_fd(int fd) {
     c->epoll_events = 0;
     c->last_active_ms = 0;
     c->rx_start_ms = 0;
+    if (c->ws_msg) {
+        free(c->ws_msg);
+        c->ws_msg = NULL;
+    }
+    c->ws_msg_len = 0;
+    c->ws_msg_cap = 0;
+    if (c->ws_aux) {
+        free(c->ws_aux);
+        c->ws_aux = NULL;
+    }
+    c->ws_aux_len = 0;
+    c->ws_slot = -1;
     tls_active_conns--;
 }
 
@@ -698,6 +720,12 @@ int32_t honk_wait(int32_t *out_fds, uint8_t *out_date29, int32_t timeout_ms) {
                 c->sendfile_fd = -1;
                 c->sendfile_off = 0;
                 c->sendfile_remain = 0;
+                c->ws_slot = -1;
+                c->ws_msg = NULL;
+                c->ws_msg_len = 0;
+                c->ws_msg_cap = 0;
+                c->ws_aux = NULL;
+                c->ws_aux_len = 0;
                 c->last_active_ms = tls_now_ms;
                 c->rx_start_ms = 0;
 
@@ -803,6 +831,116 @@ int32_t honk_conn_read(int32_t fd, gs_rref rx_buf) {
     }
     c->last_active_ms = tls_now_ms;
     return (int32_t)honk_rref_len(rx_buf);
+}
+/* Claim fd for non-blocking WebSockets: Goose owns slot SI (its fixed pool),
+ * the C conn records it as source of truth (stale Goose slots revalidate). */
+void honk_ws_upgrade(int32_t fd, int32_t slot) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return;
+    if (slot < 0) return;
+    tls_conns[fd].ws_slot = slot;
+}
+
+/* Goose slot index for fd, or -1 when the conn is plain HTTP/dead.
+ * Doubles as the upgraded check for the serve loop branch. */
+int32_t honk_conn_ws_slot(int32_t fd) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
+    return tls_conns[fd].ws_slot;
+}
+
+/* Raw non-blocking read for upgraded connections. Appends available bytes to
+ * the turn's rx_buf (no partial_rx stash; the caller owns cross-turn state).
+ * Returns bytes appended (>0), 0 on EAGAIN (fd stays open), or -1 on
+ * EOF/error (connection closed). Caps one turn at 1 MiB (level-triggered
+ * epoll re-fires for the rest). */
+int32_t honk_ws_poll(int32_t fd, gs_rref rx_buf) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) {
+        return -1;
+    }
+    honk_conn_t *c = &tls_conns[fd];
+    int64_t total = 0;
+    for (;;) {
+        ssize_t n = recv(fd, honk_rref_write_ptr(rx_buf), HONK_RECV_CHUNK, 0);
+        if (n > 0) {
+            honk_rref_commit(rx_buf, (int64_t)n);
+            total += (int64_t)n;
+            if (n < HONK_RECV_CHUNK || honk_rref_len(rx_buf) >= 1048576) break;
+            continue;
+        }
+        if (n == 0) {
+            if (total > 0) break;
+            close_conn_fd(fd);
+            return -1;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        close_conn_fd(fd);
+        return -1;
+    }
+    if (total > 0) c->last_active_ms = tls_now_ms;
+    return (int32_t)total;
+}
+
+/* Append frame payload to the assembling message (lazy realloc, 1 MiB cap).
+ * Returns the new total, -1 when closed, -2 over cap (caller sends 1009). */
+int32_t honk_ws_msg_append(int32_t fd, sl_u8_shim bytes) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
+    honk_conn_t *c = &tls_conns[fd];
+    if ((size_t)bytes.len > HONK_WS_MAX_MSG - c->ws_msg_len) return -2;
+    size_t need = c->ws_msg_len + (size_t)bytes.len;
+    if (need > c->ws_msg_cap) {
+        size_t cap = c->ws_msg_cap ? c->ws_msg_cap : 1024;
+        while (cap < need) cap *= 2;
+        if (cap > HONK_WS_MAX_MSG) cap = HONK_WS_MAX_MSG;
+        uint8_t *nb = (uint8_t *)realloc(c->ws_msg, cap);
+        if (!nb) return -1;
+        c->ws_msg = nb;
+        c->ws_msg_cap = cap;
+    }
+    memcpy(c->ws_msg + c->ws_msg_len, bytes.data, (size_t)bytes.len);
+    c->ws_msg_len = need;
+    return (int32_t)need;
+}
+
+/* Move the assembled message into the turn buffer and reset (keeps the
+ * allocation for reuse; freed on close). Returns bytes moved, -1 if closed. */
+int64_t honk_ws_msg_take(int32_t fd, gs_rref out) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
+    honk_conn_t *c = &tls_conns[fd];
+    if (c->ws_msg_len > 0) {
+        honk_rref_append(out, c->ws_msg, (int64_t)c->ws_msg_len);
+    }
+    int64_t n = (int64_t)c->ws_msg_len;
+    c->ws_msg_len = 0;
+    return n;
+}
+
+/* Store the immutable handshake blob (path bytes ++ user bytes, exact-size).
+ * Returns 0, or -1 when closed. */
+int32_t honk_ws_aux_set(int32_t fd, sl_u8_shim blob) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
+    honk_conn_t *c = &tls_conns[fd];
+    if (c->ws_aux) {
+        free(c->ws_aux);
+        c->ws_aux = NULL;
+        c->ws_aux_len = 0;
+    }
+    if (blob.len <= 0) return 0;
+    uint8_t *nb = (uint8_t *)malloc((size_t)blob.len);
+    if (!nb) return -1;
+    memcpy(nb, blob.data, (size_t)blob.len);
+    c->ws_aux = nb;
+    c->ws_aux_len = (size_t)blob.len;
+    return 0;
+}
+
+/* Copy the handshake blob into the turn buffer. Returns bytes, -1 if closed. */
+int64_t honk_ws_aux_get(int32_t fd, gs_rref out) {
+    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
+    honk_conn_t *c = &tls_conns[fd];
+    if (c->ws_aux_len > 0) {
+        honk_rref_append(out, c->ws_aux, (int64_t)c->ws_aux_len);
+    }
+    return (int64_t)c->ws_aux_len;
 }
 
 static int parse_strict_content_length(const char *val, size_t len, size_t *out_cl) {
@@ -1278,93 +1416,6 @@ void honk_buf_reset(gs_rref buf) {
     honk_rref_reset(buf);
 }
 
-/* Poll-backed exact read for upgraded WebSocket connections on SOCK_NONBLOCK fds.
- * Checks honk_should_stop() every 100 ms so SIGINT/SIGTERM wakes idle sockets cleanly. */
-int32_t honk_ws_recv_exact(int32_t fd, gs_rref out, int32_t count, int32_t timeout_ms) {
-    if (count <= 0) return 0;
-    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
-    int64_t deadline = (timeout_ms > 0) ? (monotonic_ms() + (int64_t)timeout_ms) : 0;
-    int32_t got = 0;
-    while (got < count) {
-        if (honk_should_stop()) return -1;
-        ssize_t n = recv(fd, honk_rref_write_ptr(out), (size_t)(count - got), 0);
-        if (n > 0) {
-            honk_rref_commit(out, (int64_t)n);
-            got += (int32_t)n;
-            tls_conns[fd].last_active_ms = monotonic_ms();
-            continue;
-        }
-        if (n == 0) return -1;
-        if (errno == EINTR) continue;
-        if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
-
-        int wait_ms = 100;
-        if (deadline > 0) {
-            int64_t rem = deadline - monotonic_ms();
-            if (rem <= 0) return -1;
-            if (rem < (int64_t)wait_ms) wait_ms = (int)rem;
-        }
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-        int pr = poll(&pfd, 1, wait_ms);
-        if (pr < 0 && errno != EINTR) return -1;
-    }
-    return got;
-}
-
-/* Unmask RFC 6455 client payload in-place inside `out[offset .. offset + len]`. */
-void honk_ws_unmask(gs_rref out, int64_t offset, int64_t len, int32_t mask_be) {
-    if (offset < 0 || len <= 0 || offset + len > honk_rref_len(out)) return;
-    uint8_t m[4];
-    m[0] = (uint8_t)((uint32_t)mask_be >> 24);
-    m[1] = (uint8_t)(((uint32_t)mask_be >> 16) & 0xffU);
-    m[2] = (uint8_t)(((uint32_t)mask_be >> 8) & 0xffU);
-    m[3] = (uint8_t)((uint32_t)mask_be & 0xffU);
-    uint8_t *p = honk_rref_data(out) + offset;
-    for (int64_t i = 0; i < len; i++) {
-        p[i] ^= m[i & 3];
-    }
-}
-
-/* Poll-backed full write for upgraded WebSocket frames on SOCK_NONBLOCK fds. */
-int32_t honk_ws_send_all(int32_t fd, sl_u8_shim data, int32_t timeout_ms) {
-    if (data.len <= 0) return 0;
-    if (fd < 0 || fd >= HONK_MAX_FD || !tls_conns || !tls_conns[fd].active) return -1;
-    if (flush_pending_tx(fd) < 0) return -1;
-    int64_t deadline = (timeout_ms > 0) ? (monotonic_ms() + (int64_t)timeout_ms) : 0;
-    size_t total = (size_t)data.len;
-    size_t off = 0;
-    while (off < total) {
-        if (honk_should_stop()) return -1;
-        ssize_t n = send(fd, data.data + off, total - off, MSG_NOSIGNAL);
-        if (n > 0) {
-            off += (size_t)n;
-            tls_conns[fd].last_active_ms = monotonic_ms();
-            continue;
-        }
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            int wait_ms = 100;
-            if (deadline > 0) {
-                int64_t rem = deadline - monotonic_ms();
-                if (rem <= 0) return -1;
-                if (rem < (int64_t)wait_ms) wait_ms = (int)rem;
-            }
-            struct pollfd pfd;
-            pfd.fd = fd;
-            pfd.events = POLLOUT;
-            pfd.revents = 0;
-            int pr = poll(&pfd, 1, wait_ms);
-            if (pr < 0 && errno != EINTR) return -1;
-            continue;
-        }
-        return -1;
-    }
-    return 0;
-}
-
 /* Queue file bytes [offset, offset + count) behind any pending headers and
  * push via sendfile(). The turn MUST have flushed earlier tx_buf bytes first
  * (headers precede file bytes). At most one active transfer per connection:
@@ -1669,6 +1720,12 @@ int32_t honk_test_register_fd(int32_t cfd, int32_t with_partial_rx, int32_t forc
         c->sendfile_fd = -1;
         c->sendfile_off = 0;
         c->sendfile_remain = 0;
+        c->ws_slot = -1;
+        c->ws_msg = NULL;
+        c->ws_msg_len = 0;
+        c->ws_msg_cap = 0;
+        c->ws_aux = NULL;
+        c->ws_aux_len = 0;
         c->last_active_ms = tls_now_ms;
         c->rx_start_ms = 0;
         tls_active_conns++;
