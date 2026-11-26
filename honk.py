@@ -163,11 +163,11 @@ def cmd_setup(_args):
     jobs = str(os.cpu_count() or 4)
     print("configuring goose (cmake) ...")
     if run(["cmake", "-B", "build-linux", "-DCMAKE_BUILD_TYPE=Release"],
-           cwd=repo).returncode != 0:
+           cwd=repo, env=cc_env()).returncode != 0:
         return 1
     print(f"building goose (-j{jobs}, a few minutes) ...")
     if run(["cmake", "--build", "build-linux", "--config", "Release",
-            "-j", jobs], cwd=repo).returncode != 0:
+            "-j", jobs], cwd=repo, env=cc_env()).returncode != 0:
         return 1
     return cmd_doctor([])
 
@@ -288,12 +288,22 @@ def uses_sqlite(goose_file):
         return False
 
 
+def cc_env():
+    """Compiler env: route C compiles through ccache when installed (same
+    compiler/flags, just cached — zero effect on output binaries)."""
+    env = dict(os.environ)
+    env.update(sqlite_env())
+    if shutil.which("ccache"):
+        env.setdefault("CC", "ccache gcc")
+        env.setdefault("CXX", "ccache g++")
+    return env
+
+
 def build_app(goose_file, out_bin, asan=False):
     gb = goose_bin()
     if not gb:
         return False, "goose compiler not found (run ./honk doctor)"
-    env = dict(os.environ)
-    env.update(sqlite_env())
+    env = cc_env()
     if not asan:
         r = run([gb, "build", goose_file, "-o", out_bin], capture=True, env=env)
         ok = r.returncode == 0
@@ -307,23 +317,42 @@ def build_app(goose_file, out_bin, asan=False):
         return False, (r.stdout + r.stderr)[-3000:]
     shim = os.path.join(HONK_ROOT, "src", "shim")
     rt = os.path.join(HONK_ROOT, "goose_repo", "src", "runtime")
-    cc = shutil.which("gcc") or "cc"
+    cc = env.get("CC", shutil.which("gcc") or "cc").split()
     srcs = [f"{shim}/honk_shim.c", f"{shim}/picohttpparser.c"]
     libs = ["-lm", "-pthread", "-ldl"]
     if uses_sqlite(goose_file):
         srcs.append(f"{shim}/honk_sqlite_shim.c")
         libs.append("-lsqlite3")
-    r = run([cc, "-O1", "-g", "-fsanitize=address,undefined",
-             "-fno-sanitize-recover=all", f"-I{shim}", f"-I{rt}", standalone,
-             *srcs, "-o", out_bin, *libs], capture=True, env=env)
+    # One TU per cc call: ccache cannot cache multi-file compiles, and the
+    # shim objects are identical across every ASan target (cache hits).
+    objdir = stem + ".asan.d"
+    os.makedirs(objdir, exist_ok=True)
+    objs, log = [], ""
+    for src in [standalone, *srcs]:
+        obj = os.path.join(objdir, os.path.basename(src) + ".o")
+        r = run([*cc, "-O1", "-g", "-fsanitize=address,undefined",
+                 "-fno-sanitize-recover=all", f"-I{shim}", f"-I{rt}",
+                 "-c", src, "-o", obj], capture=True, env=env)
+        log += (r.stdout + r.stderr)[-1000:]
+        if r.returncode != 0:
+            shutil.rmtree(objdir, ignore_errors=True)
+            try:
+                os.remove(standalone)
+            except OSError:
+                pass
+            return False, log[-3000:]
+        objs.append(obj)
+    r = run([*cc, *objs, "-o", out_bin, *libs,
+             "-fsanitize=address,undefined"], capture=True, env=env)
     try:
         os.remove(standalone)
+        shutil.rmtree(objdir, ignore_errors=True)
     except OSError:
         pass
     ok = r.returncode == 0
     if ok:
         write_build_info(out_bin, asan=True)
-    return ok, (r.stdout + r.stderr)[-3000:]
+    return ok, (r.stdout + r.stderr + log)[-3000:]
 
 
 def cmd_build(args):

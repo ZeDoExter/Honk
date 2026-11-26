@@ -11,14 +11,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('src/shim/**') }}
+          restore-keys: ccache-${{ runner.os }}-
+
       - name: Install toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc g++ cmake make git python3 libsqlite3-dev
-
+            gcc g++ cmake make git python3 libsqlite3-dev ccache
       - name: Toolchain setup (pinned Goose)
         run: python3 honk.py setup
+
 
       - name: Full test suite (Release + ASan/UBSan/LSan)
         run: python3 honk.py test
