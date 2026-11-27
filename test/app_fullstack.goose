@@ -109,6 +109,17 @@ thread_fn p5_worker(cfg: P5WorkerCfg) {
                 } else {
                     ctx.sql_json_one_text(db, "SELECT id, name, age FROM kv WHERE name = ?1 ORDER BY id LIMIT 1;", nm);
                 }
+            } else if ctx.method == "GET" && ctx.path == "/db/search" {
+                let nm, nok = ctx.query_decoded("name");
+                if !nok || nm.len == 0 {
+                    ctx.json_error(400, "missing name");
+                } else {
+                    var pat: u8[>..] = [];
+                    pat.push('%');
+                    like_escape(nm, pat);
+                    pat.push('%');
+                    ctx.sql_json_text(db, "SELECT id, name, age FROM kv WHERE name LIKE ?1 ESCAPE '\\' ORDER BY id;", pat[..]);
+                }
             } else if ctx.method == "GET" && ctx.path == "/db/sorted" {
                 let by = ctx.query_str_or("by", "id");
                 let col = if by == "name" { "name" } else if by == "age" { "age" } else { "id" };

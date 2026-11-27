@@ -241,6 +241,49 @@ inline fn sql_json(app: honk::Ctx&, db: Db&, sql: const u8[:]) {
     }
 }
 
+// Escape LIKE wildcards in user input (`%`, `_`, and the escape char).
+// Pair with `... LIKE ?N ESCAPE '\'` and a bound pattern: matched text stays
+// literal while the caller's own `%` wrappers still act as wildcards.
+fn like_escape(s: const u8[:], out: u8[>..]&) -> const u8[:] {
+    let start = out.len;
+    for ch in s {
+        if ch == '%' || ch == '_' || ch == '\\' { out.push('\\'); }
+        out.push(ch);
+    }
+    return out[start..];
+}
+
+// Bound single-text-param query streaming every row (`sql_json` with `?1`).
+inline fn sql_json_text(app: honk::Ctx&, db: Db&, sql: const u8[:], val: const u8[:]) {
+    let st, ok = db_prepare(db, sql);
+    if !ok || hsql_bind_text(st.h, 1, val, 1) != 0 {
+        if ok { stmt_finalize(st); }
+        app.json_error(500, "query failed");
+        return;
+    }
+    let start = app.tmp.len;
+    app.tmp.push('[');
+    var first = true;
+    var failed = false;
+    var rc = stmt_step(st);
+    while rc == ROW {
+        if !first { app.tmp.push(','); }
+        first = false;
+        if !row_to_json(app, st, app.tmp) { failed = true; break; }
+        rc = stmt_step(st);
+    }
+    if rc != DONE { failed = true; }
+    stmt_finalize(st);
+    if failed {
+        app.json_error(500, "query failed");
+    } else {
+        app.tmp.push(']');
+        let rstart = app.res.len;
+        app.res.append(app.tmp[start..]);
+        app.json_raw(200, app.res[rstart..]);
+    }
+}
+
 inline fn sql_json_one(app: honk::Ctx&, db: Db&, sql: const u8[:], id: i64) {
     let st, ok = db_prepare(db, sql);
     if !ok || hsql_bind_int(st.h, 1, id) != 0 {

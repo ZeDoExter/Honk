@@ -380,8 +380,16 @@ SQLite rules:
 - Run schema DDL once in `main` before forking or spawning workers.
 - **No SQL injection by construction — if you follow one rule**: SQL text must
   be 100% developer constants; user bytes enter ONLY through `?N` bindings
-  (`bind_*`, `insert_text`, `run_int`, `sql_json_one*`). NEVER `append`/`format`
-  raw input into SQL — not even inside `LIKE` (bind the pattern instead).
+  (`bind_*`, `insert_text`, `run_int`, `sql_json_one*`, `sql_json_text`).
+  NEVER `append`/`format` raw input into SQL — for `LIKE`, bind the pattern
+  and escape wildcards with `like_escape` (pair with `ESCAPE '\'`):
+  ```goose
+  var pat: u8[>..] = [];
+  pat.push('%');
+  like_escape(query, pat);
+  pat.push('%');
+  app.sql_json_text(db, "SELECT ... WHERE name LIKE ?1 ESCAPE '\\' ...", pat[..]);
+  ```
 - **Identifiers need allowlists** (columns/tables/directions can't be bound):
   ```goose
   let col = if by == "name" { "name" } else if by == "age" { "age" } else { "id" };
@@ -399,11 +407,10 @@ SQLite rules:
 - **Zero-code multi-worker (`$HONK_WORKERS`)**: `HONK_WORKERS=auto ./main 8080` or `honk::listen_workers(port, n)`.
 - **Graceful shutdown (`SIGINT` / `SIGTERM`)**: closes listening socket immediately, forwards `SIGTERM` to forked workers, and flushes queued outbound bytes up to `2s` before exiting `0`.
 - **Reverse proxy (TLS)**: terminate TLS in nginx/Caddy and proxy HTTP/1.1 to `http://127.0.0.1:8080`.
-- **Long-lived connections (WS/SSE/stream) pin a worker**: each open stream
-  blocks its worker's event loop, so size `HONK_WORKERS >= long-lived conns + N`
-  (e.g. 50 idle chat sockets + 4 spare workers for API traffic). Send a WS ping
-  at least every ~25s (idle sockets time out at 30s); for 10k+ concurrent
-  streams, fan out through a gateway instead.
+- **Long-lived `stream()`/`sse()` responses pin a worker**: each open stream
+  blocks its worker's event loop, so size `HONK_WORKERS >= streams + N`.
+  WebSockets do NOT pin (non-blocking turns, 1024 upgrades/worker); idle
+  sockets of any kind still time out at 30s, so keep a heartbeat.
 - **Rate limiter is edge best-effort**: fixed-window, per-worker (quota
   multiplies by worker count), hash collisions fail open. Enough to slow
   scrapers; enforce strict quotas at your gateway/LB.

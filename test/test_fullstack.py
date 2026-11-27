@@ -423,6 +423,39 @@ def test_db_sorted(port):
     print("  [PASS] test_db_sorted")
 
 
+def test_db_search(port):
+    def post(body):
+        s, f = req(port, b"POST /db HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+        out = read_response(f)
+        s.close()
+        return out
+
+    def search(qs):
+        s, f = req(port, b"GET /db/search?" + qs + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        out = read_response(f)
+        s.close()
+        return out
+
+    post(b'{"name":"q_100%","age":1}')
+    post(b'{"name":"q_200","age":2}')
+    post(b'{"name":"plain","age":3}')
+
+    def names(body):
+        return [r["name"] for r in pyjson.loads(body) if r["name"].startswith("q_") or r["name"] == "plain"]
+
+    # Literal % / _ match only themselves (escaped), plain substring still works.
+    _, _, r1 = search(b"name=100%25")
+    assert names(r1) == ["q_100%"], r1
+    _, _, r2 = search(b"name=q_")
+    assert names(r2) == ["q_100%", "q_200"], r2
+    _, _, r3 = search(b"name=plain")
+    assert names(r3) == ["plain"], r3
+    # Injection attempt is inert data (bound + escaped).
+    _, _, r4 = search(b'name=%22%20OR%20%221%22=%221')
+    assert names(r4) == [], r4
+    print("  [PASS] test_db_search")
+
 
 def test_db_crud(port):
     def post(body):
@@ -779,6 +812,7 @@ def run_suite(server_bin, port, label):
             test_static_precompressed(port, root)
             test_db_crud(port)
             test_db_sorted(port)
+            test_db_search(port)
             test_db_strings(port)
             s = socket.create_connection(("127.0.0.1", port), timeout=2.0)
             s.sendall(b"POST /__shutdown HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -797,7 +831,7 @@ def run_suite(server_bin, port, label):
     test_db_2workers(server_bin, port + 50, label)
     test_db_fork_and_guard(server_bin, port + 55, label)
     test_fullstack_e2e(label)
-    print(f"=== ALL 16 FULLSTACK TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 17 FULLSTACK TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":
