@@ -288,6 +288,14 @@ def uses_sqlite(goose_file):
         return False
 
 
+def uses_gzip(goose_file):
+    try:
+        with open(goose_file) as f:
+            return "honk_gzip" in f.read()
+    except OSError:
+        return False
+
+
 def cc_env():
     """Compiler env: route C compiles through ccache when installed (same
     compiler/flags, just cached — zero effect on output binaries)."""
@@ -323,6 +331,9 @@ def build_app(goose_file, out_bin, asan=False):
     if uses_sqlite(goose_file):
         srcs.append(f"{shim}/honk_sqlite_shim.c")
         libs.append("-lsqlite3")
+    if uses_gzip(goose_file):
+        srcs.append(f"{shim}/honk_gzip_shim.c")
+        libs.append("-lz")
     # One TU per cc call: ccache cannot cache multi-file compiles, and the
     # shim objects are identical across every ASan target (cache hits).
     objdir = stem + ".asan.d"

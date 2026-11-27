@@ -226,6 +226,28 @@ gzip -9 -k public/app.js && brotli -q 11 -k public/app.js
 # -> app.js.gz / app.js.br served automatically on Accept-Encoding,
 #    with -gz/-br ETag suffixes; skipped for Range requests and media types
 ```
+
+Dynamic bodies (JSON APIs, rendered HTML) compress per request instead —
+explicit per route, nothing in the hot path for everyone else:
+
+```goose
+import honk_gzip from "../gzip";   // opt-in: links -lz only when imported
+
+honk::listen(18080) { app =>
+    app.get("/api/feed") {
+        var b: u8[>..] = [];
+        // ... serialize JSON into b ...
+        app.json_gz(200, b[..]);   // gzip iff >= 1024 bytes + client accepts
+    };
+};
+```
+
+Rules: `json_gz`/`text_gz`/`html_gz` send gzip only when the body clears
+`threshold` (default `1024`, pass `0` to always try) AND `Accept-Encoding`
+carries an explicit `gzip` token (`q=0` refuses; `*` alone does not count).
+Level is zlib's default (`6`); one `malloc`/`free` per compressed response.
+Static files should keep using precompressed sidecars (zero per-request CPU).
+
 ## Bind control & Unix sockets (zero-TCP proxying)
 
 ```goose

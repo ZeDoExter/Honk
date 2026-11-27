@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 
 
 def read_response(f, skip_body=False):
@@ -428,6 +429,46 @@ def test_websocket_and_openapi(port):
     print("  [PASS] test_websocket_and_openapi")
 
 
+def test_gzip(port):
+    def get(path, ae=None):
+        s = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+        h = f"GET {path} HTTP/1.1\r\nHost: x\r\n".encode()
+        if ae is not None:
+            h += f"Accept-Encoding: {ae}\r\n".encode()
+        h += b"Connection: close\r\n\r\n"
+        s.sendall(h)
+        f = s.makefile("rb")
+        out = read_response(f)
+        s.close()
+        return out
+
+    big = (b"0123456789ABCDEF" * 4) * 80
+    assert len(big) == 5120
+    # Roundtrip: gzip bytes + framing headers, decodes to the exact body.
+    code, hdrs, body = get("/gz/big", "gzip")
+    assert code == 200 and hdrs.get(b"content-encoding") == b"gzip", (code, hdrs)
+    assert hdrs.get(b"vary") == b"Accept-Encoding", hdrs
+    assert hdrs.get(b"content-type") == b"application/json", hdrs
+    assert zlib.decompress(body, 16 + zlib.MAX_WBITS) == big
+    # No header: identity.
+    code, hdrs, body = get("/gz/big")
+    assert code == 200 and b"content-encoding" not in hdrs and body == big
+    # Threshold: tiny body stays identity even when accepted.
+    code, hdrs, body = get("/gz/small", "gzip, deflate")
+    assert code == 200 and b"content-encoding" not in hdrs and body == b"tiny"
+    # Refusal honored: q=0 means identity.
+    code, hdrs, body = get("/gz/big", "gzip;q=0")
+    assert code == 200 and b"content-encoding" not in hdrs and body == big
+    # Case-insensitive token + html helper.
+    html = (b"<p>" + b"0123456789ABCDEF" * 3 + b"</p>") * 40
+    assert len(html) == 2200
+    code, hdrs, body = get("/gz/html", "GZip")
+    assert code == 200 and hdrs.get(b"content-encoding") == b"gzip", (code, hdrs)
+    assert hdrs.get(b"content-type") == b"text/html", hdrs
+    assert zlib.decompress(body, 16 + zlib.MAX_WBITS) == html
+    print("  [PASS] test_gzip")
+
+
 def test_outbound_drain_on_sigterm(server_bin, port, label):
     err_path = f"/tmp/honkdsl_{label}_drain_stderr.txt"
     with open(err_path, "wb") as err_fh:
@@ -528,7 +569,7 @@ def run_suite(server_bin, port, label):
             test_jwriter_and_body_helpers(port)
             test_streaming_sse_chunked_and_forms(port)
             test_websocket_and_openapi(port)
-
+            test_gzip(port)
             # Idle SIGINT: must wake epoll_wait via EINTR immediately and exit 0
             t0 = time.monotonic()
             proc.send_signal(signal.SIGINT)
@@ -544,7 +585,7 @@ def run_suite(server_bin, port, label):
 
     test_outbound_drain_on_sigterm(server_bin, port + 2, label)
     test_multiworker_fork(server_bin, port + 4, label)
-    print(f"=== ALL 9 APP DSL + RUNTIME TESTS PASSED [{label}] ===\n")
+    print(f"=== ALL 10 APP DSL + RUNTIME TESTS PASSED [{label}] ===\n")
 
 
 if __name__ == "__main__":

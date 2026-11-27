@@ -8,6 +8,7 @@ import os;
 import honk from "..";
 import honk.src.honk_ws.honk_ws;
 import honk.src.honk_openapi.honk_openapi;
+import honk_gzip from "../gzip";
 
 fn dsl_routes(app: honk::Ctx&) {
     app.get("/", "dsl root");
@@ -174,6 +175,25 @@ fn dsl_routes(app: honk::Ctx&) {
             spec.op_auth("DELETE", "/todos/:id", "Delete");
         };
         app.docs("/docs", "/v1/openapi.json", "DSL API");
+    };
+
+    // Dynamic gzip: 5120-byte JSON, tiny text (threshold), 2200-byte HTML.
+    app.get("/gz/big") {
+        var b: u8[>..] = [];
+        for _ in 80 {
+            b.append("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF");
+        }
+        app.json_gz(200, b[..]);
+    };
+    app.get("/gz/small") {
+        app.text_gz(200, "tiny");
+    };
+    app.get("/gz/html") {
+        var b: u8[>..] = [];
+        for _ in 40 {
+            b.append("<p>0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF</p>");
+        }
+        app.html_gz(200, b[..]);
     };
 
     // 128 KiB response with shrunk SO_SNDBUF (16 KiB) for SIGTERM drain test.

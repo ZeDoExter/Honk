@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc g++ cmake make git python3 libsqlite3-dev ccache
+            gcc g++ cmake make git python3 libsqlite3-dev zlib1g-dev ccache
       - name: Toolchain setup (pinned Goose)
         run: python3 honk.py setup
 
